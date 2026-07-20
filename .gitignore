@@ -1,0 +1,26 @@
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Cache e bytecode do Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Distribuição / build
+build/
+dist/
+*.egg-info/
+
+# Editores / IDEs
+.vscode/
+.idea/
+
+# Sistema operacional
+Thumbs.db
+desktop.ini
+
+# Arquivos de dados locais (planilhas de teste, saídas geradas)
+data/*
+!data/.gitkeep
