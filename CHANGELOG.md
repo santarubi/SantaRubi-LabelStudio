@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## [v1.3-produtividade] - Interface congelada
+
+Checkpoint oficial de encerramento do ciclo de produtividade da interface.
+Detalhes completos em `DOCUMENTACAO_CHECKPOINT.md`, capítulo "Checkpoint
+v1.3-produtividade".
+
+### Added
+- Pesquisa instantânea por código, categoria, descrição e número —
+  case insensitive, ignora acentos, com `_search_blob` pré-processado para
+  manter a busca rápida mesmo com milhares de produtos.
+- Filtro por categoria (dinâmico, único, ordenado, com opção "Todos"),
+  combinável com a pesquisa de texto.
+- Contadores "Total", "Exibindo" e "Selecionados", com atualização
+  automática em qualquer mudança de filtro ou seleção.
+- Botão dedicado "Imprimir Selecionados", reaproveitando integralmente o
+  pipeline de impressão existente (quantidade, agrupamento em 3 colunas,
+  `build_row()`, `PrinterService`).
+- Atalhos de produtividade: Ctrl+F, ESC, Ctrl+A, Enter (na pesquisa) e
+  duplo clique.
+- Seleção contínua por arraste na tabela, usando a seleção nativa do
+  Treeview.
+
+### Notes
+- Interface considerada madura para uso diário — ajustes futuros de
+  usabilidade somente mediante necessidade comprovada. Próximas versões
+  devem priorizar confiabilidade, manutenção, funcionalidades
+  administrativas, arquitetura e distribuição do sistema.
+- Nenhuma alteração em `ZplBuilder`, `PrinterService`, `LabelRenderer`,
+  `build()` ou `build_row()` durante todo o ciclo v1.3.
+
 ## [v1.2-layout-final] - Layout da etiqueta congelado
 
 Checkpoint oficial após validação física completa na ELGIN L42PRO FULL.

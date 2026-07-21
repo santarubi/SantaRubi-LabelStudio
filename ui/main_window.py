@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 import tkinter as tk
+import unicodedata
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
@@ -27,6 +28,8 @@ WINDOW_SIZE = "1000x700"
 # o conteúdo nas colunas restantes (ver DOCUMENTACAO_CHECKPOINT.md, cap. 2.6).
 BATCH_ROW_COLUMNS = 3
 BATCH_COLUMN_PITCH = 264
+
+CATEGORY_ALL = "Todos"
 
 
 class MainWindow:
@@ -56,12 +59,14 @@ class MainWindow:
         self.sort_column: str | None = None
         self.sort_reverse = False
         self.search_var = tk.StringVar()
+        self.category_var = tk.StringVar(value=CATEGORY_ALL)
 
         self.loaded_products_count = 0
         self.selected_products_count = 0
         self.labels_to_print_count = 0
         self.loaded_count_var = tk.StringVar(value="Produtos carregados: 0")
         self.selected_count_var = tk.StringVar(value="Selecionados: 0")
+        self.filter_summary_var = tk.StringVar(value="Total: 0 | Exibindo: 0 | Selecionados: 0")
         self.labels_count_var = tk.StringVar(value="Etiquetas: 0")
 
         if self.config.get("last_mode") in ("batch", "quick"):
@@ -80,6 +85,8 @@ class MainWindow:
 
         self.label_renderer: LabelRenderer | None = None
         self.printer_service: PrinterService | None = None
+        self._drag_anchor_id: str | None = None
+        self._drag_active = False
         self.batch_cancelled = False
         self.batch_thread: threading.Thread | None = None
         self.batch_progress_var = tk.DoubleVar(value=0.0)
@@ -163,9 +170,20 @@ class MainWindow:
         search_frame = ttk.Frame(top_controls)
         search_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
         search_frame.grid_columnconfigure(0, weight=1)
-        ttk.Label(search_frame, text="Pesquisar").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Entry(search_frame, textvariable=self.search_var).grid(row=1, column=0, sticky="ew")
+        search_frame.grid_columnconfigure(1, weight=0, minsize=220)
+        ttk.Label(search_frame, text="Pesquisar produto").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        self.search_entry.grid(row=1, column=0, sticky="ew", padx=(0, 12))
         self.search_var.trace_add("write", lambda *_: self._on_search_change())
+        self.search_entry.bind("<Escape>", self._on_search_escape)
+        self.search_entry.bind("<Return>", self._on_search_enter)
+
+        ttk.Label(search_frame, text="Categoria").grid(row=0, column=1, sticky="w", pady=(0, 4))
+        self.category_combobox = ttk.Combobox(
+            search_frame, textvariable=self.category_var, values=[CATEGORY_ALL], state="readonly"
+        )
+        self.category_combobox.grid(row=1, column=1, sticky="ew")
+        self.category_combobox.bind("<<ComboboxSelected>>", self._on_category_change)
 
         content_frame = ttk.Frame(main_container)
         content_frame.grid(row=2, column=0, sticky="nsew")
@@ -176,7 +194,7 @@ class MainWindow:
         left_panel = ttk.Frame(content_frame, style="Card.TFrame", padding=12)
         left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
         left_panel.grid_columnconfigure(0, weight=1)
-        left_panel.grid_rowconfigure(1, weight=1)
+        left_panel.grid_rowconfigure(2, weight=1)
 
         selection_buttons = ttk.Frame(left_panel)
         selection_buttons.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -187,8 +205,12 @@ class MainWindow:
         ttk.Button(selection_buttons, text="Desmarcar Todos", style="App.TButton", command=self._deselect_all).grid(row=0, column=1, sticky="ew", padx=(8, 8))
         ttk.Button(selection_buttons, text="Inverter Seleção", style="App.TButton", command=self._invert_selection).grid(row=0, column=2, sticky="ew")
 
+        ttk.Label(left_panel, textvariable=self.filter_summary_var, style="Subtitle.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(0, 6)
+        )
+
         table_frame = ttk.Frame(left_panel)
-        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.grid(row=2, column=0, sticky="nsew")
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
 
@@ -223,7 +245,11 @@ class MainWindow:
 
         self.product_tree.bind("<<TreeviewSelect>>", self._on_table_select)
         self.product_tree.bind("<Double-1>", self._on_table_double_click)
-        self.product_tree.bind("<Button-1>", self._on_table_click)
+        self.product_tree.bind("<ButtonPress-1>", self._on_table_press)
+        self.product_tree.bind("<B1-Motion>", self._on_table_drag)
+        self.product_tree.bind("<ButtonRelease-1>", self._on_table_release)
+        self.product_tree.bind("<Control-a>", self._on_table_select_all_shortcut)
+        self.product_tree.bind("<Control-A>", self._on_table_select_all_shortcut)
 
         right_panel = ttk.Frame(content_frame, style="Card.TFrame", padding=12)
         right_panel.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
@@ -268,9 +294,11 @@ class MainWindow:
         preview_button_frame.grid_columnconfigure(0, weight=1)
         preview_button_frame.grid_columnconfigure(1, weight=1)
         preview_button_frame.grid_columnconfigure(2, weight=1)
+        preview_button_frame.grid_columnconfigure(3, weight=1)
         ttk.Button(preview_button_frame, text="Visualizar", style="App.TButton", command=self._draw_preview_placeholder).grid(row=0, column=0, sticky="ew")
         ttk.Button(preview_button_frame, text="Imprimir", style="Primary.TButton", command=self._on_print).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(preview_button_frame, text="Teste de Impressão", style="Primary.TButton", command=self._on_test_print).grid(row=0, column=2, sticky="ew")
+        ttk.Button(preview_button_frame, text="Teste de Impressão", style="Primary.TButton", command=self._on_test_print).grid(row=0, column=2, sticky="ew", padx=(0, 8))
+        ttk.Button(preview_button_frame, text="Imprimir Selecionados", style="Primary.TButton", command=self._on_print_selected).grid(row=0, column=3, sticky="ew")
 
         bottom_bar = ttk.Frame(main_container, style="Header.TFrame", padding=(0, 10))
         bottom_bar.grid(row=3, column=0, sticky="ew")
@@ -279,6 +307,9 @@ class MainWindow:
         ttk.Label(bottom_bar, textvariable=self.bottom_status_var, style="Subtitle.TLabel").grid(row=0, column=0, sticky="w")
 
         self._load_printer_list()
+
+        self.root.bind_all("<Control-f>", self._on_ctrl_f_shortcut)
+        self.root.bind_all("<Control-F>", self._on_ctrl_f_shortcut)
 
     def _load_printer_list(self) -> None:
         """Popula o combobox com as impressoras instaladas e seleciona a última utilizada."""
@@ -383,33 +414,95 @@ class MainWindow:
 
         products: list[dict[str, Any]] = []
         for index, row in enumerate(self.reader.rows):
+            codigo = row.get("CODIGO")
+            categoria = row.get("CATEGORIA")
+            descricao = row.get("DESCRICAO")
+            numero = row.get("NUMERO")
             products.append(
                 {
                     "_id": f"product_{index}",
-                    "codigo": row.get("CODIGO"),
-                    "categoria": row.get("CATEGORIA"),
-                    "descricao": row.get("DESCRICAO"),
-                    "numero": row.get("NUMERO"),
+                    "codigo": codigo,
+                    "categoria": categoria,
+                    "descricao": descricao,
+                    "numero": numero,
                     "preco": row.get("PRECO"),
                     "qtd": row.get("QTD"),
+                    "_search_blob": self._build_search_blob(codigo, categoria, descricao, numero),
                 }
             )
         return products
 
-    def _apply_search_filter(self, query: str) -> list[dict[str, Any]]:
-        """Filtra os produtos carregados com base no texto de pesquisa."""
-        if not query:
-            return list(self.all_products)
+    def _normalize_search_text(self, value: Any) -> str:
+        """Remove acentuação e caixa para comparação de pesquisa (ex.: 'Café' == 'cafe')."""
+        text = "" if value is None else str(value)
+        text = unicodedata.normalize("NFKD", text)
+        text = "".join(char for char in text if not unicodedata.combining(char))
+        return text.strip().lower()
 
-        normalized_query = query.strip().lower()
-        filtered: list[dict[str, Any]] = []
-        for product in self.all_products:
-            if any(
-                normalized_query in str(product.get(field, "")).strip().lower()
-                for field in ("codigo", "categoria", "descricao", "numero")
-            ):
-                filtered.append(product)
-        return filtered
+    def _build_search_blob(self, *values: Any) -> str:
+        """Concatena os campos pesquisáveis já normalizados.
+
+        Pré-computado uma única vez por produto (na carga da planilha), para
+        que cada tecla digitada na pesquisa só faça comparações de substring
+        contra texto já normalizado — mantém a busca instantânea mesmo com
+        milhares de produtos carregados.
+        """
+        return " ".join(self._normalize_search_text(value) for value in values)
+
+    def _apply_search_filter(
+        self, query: str, products: list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
+        """Filtra os produtos informados com base no texto de pesquisa
+        (código, categoria, descrição e número), sem diferenciar
+        maiúsculas/minúsculas nem acentuação. Filtra `self.all_products`
+        quando nenhuma lista é informada."""
+        if products is None:
+            products = self.all_products
+
+        normalized_query = self._normalize_search_text(query)
+        if not normalized_query:
+            return list(products)
+
+        return [
+            product
+            for product in products
+            if normalized_query in product.get("_search_blob", "")
+        ]
+
+    def _get_category_options(self) -> list[str]:
+        """Retorna as categorias únicas da planilha carregada, ordenadas
+        alfabeticamente, com "Todos" sempre como primeira opção."""
+        categories = {
+            str(product["categoria"]).strip()
+            for product in self.all_products
+            if product.get("categoria") not in (None, "")
+        }
+        return [CATEGORY_ALL] + sorted(categories, key=str.lower)
+
+    def _refresh_category_options(self) -> None:
+        """Atualiza as opções do filtro de categoria a partir da planilha
+        carregada, mantendo "Todos" como opção padrão."""
+        self.category_combobox["values"] = self._get_category_options()
+        self.category_var.set(CATEGORY_ALL)
+
+    def _apply_filters(self) -> list[dict[str, Any]]:
+        """Aplica o filtro de categoria e a pesquisa de texto simultaneamente."""
+        products = self.all_products
+        category = self.category_var.get()
+        if category and category != CATEGORY_ALL:
+            products = [
+                product for product in products if str(product.get("categoria", "")).strip() == category
+            ]
+        return self._apply_search_filter(self.search_var.get(), products)
+
+    def _on_category_change(self, _: Any = None) -> None:
+        """Atualiza a lista exibida conforme a categoria selecionada."""
+        self.filtered_products = self._apply_filters()
+        self._load_products_into_table()
+
+    def _format_count(self, value: int) -> str:
+        """Formata um número inteiro com separador de milhar (padrão pt-BR)."""
+        return f"{value:,}".replace(",", ".")
 
     def _load_products_into_table(self) -> None:
         """Carrega a lista de produtos filtrados na Treeview de produtos."""
@@ -457,6 +550,11 @@ class MainWindow:
         self.loaded_count_var.set(f"Produtos carregados: {self.loaded_products_count}")
         self.selected_count_var.set(f"Selecionados: {self.selected_products_count}")
         self.labels_count_var.set(f"Etiquetas: {self.labels_to_print_count}")
+        self.filter_summary_var.set(
+            f"Total: {self._format_count(self.loaded_products_count)} | "
+            f"Exibindo: {self._format_count(len(self.filtered_products))} | "
+            f"Selecionados: {self._format_count(self.selected_products_count)}"
+        )
         self._refresh_bottom_status()
 
     def _refresh_bottom_status(self) -> None:
@@ -621,13 +719,15 @@ class MainWindow:
             messagebox.showerror(APP_TITLE, self.reader.error_message)
             self.status_var.set(f"Status: {self.reader.error_message}")
             self.all_products = []
+            self._refresh_category_options()
             self.filtered_products = []
             self.selected_product_ids.clear()
             self._load_products_into_table()
             return False
 
         self.all_products = self._get_product_list_from_reader()
-        self.filtered_products = self._apply_search_filter(self.search_var.get())
+        self._refresh_category_options()
+        self.filtered_products = self._apply_filters()
         self.selected_product_ids.clear()
         self._load_products_into_table()
         self.status_var.set(f"Status: Planilha carregada com {len(self.all_products)} produtos.")
@@ -668,8 +768,34 @@ class MainWindow:
 
     def _on_search_change(self) -> None:
         """Atualiza a lista exibida conforme o texto de pesquisa."""
-        self.filtered_products = self._apply_search_filter(self.search_var.get())
+        self.filtered_products = self._apply_filters()
         self._load_products_into_table()
+
+    def _on_ctrl_f_shortcut(self, event: tk.Event | None = None) -> str:
+        """Atalho Ctrl+F: leva o foco à pesquisa e seleciona o texto existente."""
+        self.search_entry.focus_set()
+        if self.search_var.get():
+            self.search_entry.select_range(0, tk.END)
+            self.search_entry.icursor(tk.END)
+        return "break"
+
+    def _on_search_escape(self, event: tk.Event | None = None) -> str:
+        """Atalho ESC no campo de pesquisa: limpa a busca, mantendo a
+        categoria selecionada (a lista já se atualiza sozinha via o trace
+        existente em search_var)."""
+        self.search_var.set("")
+        return "break"
+
+    def _on_search_enter(self, event: tk.Event | None = None) -> str:
+        """Atalho Enter no campo de pesquisa: aciona 'Imprimir Selecionados'."""
+        self._on_print_selected()
+        return "break"
+
+    def _on_table_select_all_shortcut(self, event: tk.Event | None = None) -> str:
+        """Atalho Ctrl+A com a tabela em foco: seleciona todos os produtos
+        atualmente exibidos (após filtros)."""
+        self._select_all()
+        return "break"
 
     def _on_table_select(self, _: Any) -> None:
         """Atualiza a seleção interna ao selecionar linhas na tabela e redesenha a pré-visualização."""
@@ -700,6 +826,59 @@ class MainWindow:
         if product:
             self._current_product = product
             self._draw_label_preview(product)
+
+    def _on_table_press(self, event: tk.Event) -> None:
+        """Marca a linha inicial do clique, para um possível arraste de
+        seleção contínua, e aplica o clique simples existente (alternar a
+        coluna de seleção) — no press, exatamente como sempre foi, antes de
+        qualquer arraste acontecer."""
+        self._drag_anchor_id = self.product_tree.identify_row(event.y)
+        self._drag_active = False
+        self._on_table_click(event)
+
+    def _on_table_drag(self, event: tk.Event) -> None:
+        """Estende a seleção continuamente enquanto o botão esquerdo é
+        arrastado sobre a tabela.
+
+        Usa a mesma seleção nativa do Treeview (`selection_set`) que todo o
+        resto do app já lê via `<<TreeviewSelect>>` — o contador e a preview
+        continuam atualizando sozinhos por `_on_table_select`, sem nenhuma
+        lógica de seleção duplicada aqui. Só recalcula quando o intervalo
+        realmente muda, para não recriar a seleção a cada pixel de
+        movimento (evita cintilação).
+        """
+        if not self._drag_anchor_id:
+            return
+
+        target_id = self.product_tree.identify_row(event.y)
+        if not target_id:
+            return
+
+        if target_id != self._drag_anchor_id:
+            self._drag_active = True
+
+        if not self._drag_active:
+            return
+
+        all_ids = self.product_tree.get_children("")
+        if self._drag_anchor_id not in all_ids or target_id not in all_ids:
+            return
+
+        start = all_ids.index(self._drag_anchor_id)
+        end = all_ids.index(target_id)
+        if start > end:
+            start, end = end, start
+        range_ids = all_ids[start : end + 1]
+
+        if set(range_ids) == set(self.product_tree.selection()):
+            return
+
+        self.product_tree.selection_set(range_ids)
+
+    def _on_table_release(self, event: tk.Event) -> None:
+        """Finaliza o arraste."""
+        self._drag_anchor_id = None
+        self._drag_active = False
 
     def _on_table_click(self, event: tk.Event) -> None:
         """Permite marcar/desmarcar a seleção clicando na coluna de seleção."""
@@ -840,7 +1019,12 @@ class MainWindow:
     def _on_print_selected(self) -> None:
         """Imprime apenas os produtos que foram selecionados na tabela."""
         if not self.selected_product_ids:
-            messagebox.showwarning(APP_TITLE, "Selecione pelo menos um produto para imprimir.")
+            messagebox.showwarning(
+                APP_TITLE,
+                "Nenhum produto selecionado.\n\n"
+                "Selecione um ou mais produtos na lista e clique novamente em "
+                "'Imprimir Selecionados'.",
+            )
             return
 
         products = [product for product in self.all_products if product["_id"] in self.selected_product_ids]

@@ -957,3 +957,128 @@ Alterações futuras no layout somente deverão ocorrer em caso de:
 - novo requisito de negócio.
 
 Pequenos ajustes estéticos não deverão mais ser realizados.
+
+---
+
+# Checkpoint v1.3-produtividade
+
+**Tag:** `v1.3-produtividade`
+
+## Objetivo
+
+Encerrar o ciclo de melhorias de produtividade da interface, mantendo
+totalmente preservado o motor de impressão validado no `v1.2-layout-final`.
+
+## Funcionalidades implementadas
+
+### Pesquisa instantânea
+
+- Pesquisa por código.
+- Pesquisa por descrição.
+- Pesquisa por categoria.
+- Pesquisa por número.
+- Busca case insensitive.
+- Busca ignorando acentos.
+- Pesquisa em tempo real (dispara a cada tecla, via `trace_add` na
+  `StringVar` de pesquisa).
+- Otimização utilizando `_search_blob` pré-processado: cada produto tem seu
+  texto pesquisável (código + categoria + descrição + número) normalizado
+  uma única vez na carga da planilha, não a cada tecla digitada — validado
+  com 5.001 produtos filtrando em ~3,8 ms por tecla.
+
+### Filtro por categoria
+
+- Categorias carregadas automaticamente da planilha (nunca uma lista fixa).
+- Categorias únicas (sem repetição).
+- Ordenação alfabética.
+- Opção "Todos" sempre como primeira opção e padrão ao carregar planilha nova.
+- Funcionamento combinado com a pesquisa: categoria e texto pesquisado se
+  aplicam simultaneamente sobre a mesma lista (`_apply_filters`).
+
+### Contadores
+
+- **Total** de produtos carregados.
+- **Exibindo** — produtos visíveis após os filtros.
+- **Selecionados** — produtos marcados na tabela.
+
+Atualização automática em toda alteração de filtro (categoria ou pesquisa) e
+de seleção (clique, duplo clique, Ctrl+A, arraste), sem nenhuma ação manual
+adicional do usuário.
+
+### Impressão de selecionados
+
+- Botão dedicado "Imprimir Selecionados".
+- Reutilização integral do pipeline de impressão já existente — nenhuma
+  lógica de impressão nova ou duplicada.
+- Mesma expansão por quantidade (`qtd` respeitada por etiqueta).
+- Mesmo agrupamento em linhas de 3 colunas.
+- Mesmo `build_row()`.
+- Mesmo `PrinterService`.
+
+### Produtividade
+
+Atalhos de teclado implementados:
+
+- **Ctrl+F** — foco imediato no campo de pesquisa, com o texto existente
+  selecionado.
+- **ESC** — limpa a pesquisa, mantendo a categoria selecionada.
+- **Ctrl+A** (tabela em foco) — seleciona todos os produtos exibidos após
+  os filtros (nunca os ocultos).
+- **Enter** (campo de pesquisa) — aciona "Imprimir Selecionados" quando há
+  seleção; mantém o aviso existente quando não há.
+- **Duplo clique** — alterna a seleção da linha.
+- **Seleção contínua por arraste** — ver detalhamento abaixo.
+
+### Seleção contínua por arraste
+
+- Utiliza a seleção **nativa** do Treeview (`selection_set`) — não cria
+  nenhuma estrutura de seleção paralela.
+- O contador de selecionados atualiza automaticamente durante o arraste,
+  porque tudo passa pelo mesmo caminho já existente (`<<TreeviewSelect>>` →
+  `_on_table_select` → `_refresh_counts`).
+- Compatível com todos os recursos existentes: Ctrl+Clique, Ctrl+A, duplo
+  clique, clique simples na coluna de seleção e impressão de selecionados —
+  todos validados funcionando em conjunto após a implementação.
+- Nenhuma regressão encontrada; um bug de condição de corrida entre o clique
+  simples e a seleção nativa do Treeview foi identificado e corrigido
+  durante a própria validação desta funcionalidade, antes de ser
+  considerada concluída.
+
+## Arquitetura
+
+Toda a versão v1.3 foi implementada **exclusivamente na camada de
+interface** (`ui/main_window.py`), preservando completamente o núcleo do
+sistema.
+
+Nenhum dos componentes abaixo foi alterado durante todo o ciclo v1.3:
+
+- `ZplBuilder`
+- `PrinterService`
+- `LabelRenderer`
+- `build()`
+- `build_row()`
+
+## Resultado
+
+O software passa a oferecer uma operação significativamente mais rápida e
+confortável no dia a dia — busca instantânea, filtro por categoria,
+contadores sempre visíveis, impressão seletiva e atalhos de teclado —
+mantendo **exatamente o mesmo comportamento de impressão** validado
+fisicamente no checkpoint `v1.2-layout-final`.
+
+---
+
+# Interface Congelada
+
+A interface atual foi considerada **madura para uso diário**.
+
+Novas versões deverão priorizar:
+
+- confiabilidade;
+- manutenção;
+- funcionalidades administrativas;
+- arquitetura;
+- distribuição do sistema.
+
+Pequenos ajustes de usabilidade somente deverão ocorrer mediante
+necessidade comprovada.
