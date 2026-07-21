@@ -6,8 +6,6 @@ A lógica de layout continua no renderer.
 
 from __future__ import annotations
 
-from typing import Any
-
 from PIL import Image
 from barcode import Code128
 from barcode.writer import ImageWriter, pt2mm

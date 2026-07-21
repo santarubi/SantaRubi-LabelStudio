@@ -2,7 +2,6 @@ import unittest
 from typing import Any
 
 from core.catalog_datasource import DataSource
-from core.catalog_product import CatalogProduct
 from core.catalog_repository import CatalogRepository
 from core.catalog_service import CATEGORY_ALL, SUPPLIER_ALL, CatalogService
 from core.catalog_settings import CatalogSettings

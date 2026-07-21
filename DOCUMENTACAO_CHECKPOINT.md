@@ -1082,3 +1082,136 @@ Novas versões deverão priorizar:
 
 Pequenos ajustes de usabilidade somente deverão ocorrer mediante
 necessidade comprovada.
+
+---
+
+# Checkpoint v3.0-stable
+
+**Tag:** `v3.0-stable`
+**Status:** Arquitetura oficialmente congelada. Documentação completa em
+`README.md`, `ARCHITECTURE.md`, `CHANGELOG.md` e `ROADMAP.md`.
+
+## Objetivo do ciclo
+
+Sobre a base congelada em [Interface Congelada](#interface-congelada)
+(`v1.3-produtividade`), este ciclo entregou a funcionalidade administrativa
+mais aguardada — um catálogo permanente e configurável, independente da
+planilha avulsa da aba "Impressão" — e terminou com uma rodada de
+refinamento arquitetural para eliminar toda duplicação entre as duas abas
+antes de considerar a base pronta para evoluir novamente.
+
+## Etapas do ciclo (v2.0 → v3.0)
+
+1. **Infraestrutura do Catálogo Integrado** — nova aba (`ttk.Notebook`),
+   configuração de arquivo/abas/mapeamento de colunas, validação via
+   "Testar Configuração", persistência em `config.json` (chave
+   `catalog_integrado`).
+2. **Carregamento em memória** — `CatalogRepository` com cache (nunca relê
+   o Excel para pesquisa), `CatalogProduct`, tabela com pesquisa/filtro por
+   fornecedor e contadores.
+3. **Extração de `CatalogService`** — toda a lógica de busca/filtro/
+   ordenação/estatísticas sai da interface; `CatalogTab` passa a ser
+   presentation-only. Adicionado filtro por categoria e ordenação por
+   coluna.
+4. **Usabilidade** — mapeamento de quantidade padrão (coluna QTD),
+   reorganização de layout para priorizar a tabela.
+5. **Separação de domínio** — correção de modelagem: `quantidade` sai de
+   `CatalogProduct` (entidade permanente) e nasce `PrintItem` (solicitação
+   de impressão) + `PrintQueue` (fila). Painel de configuração recolhível.
+6. **`PrintQueue` como coleção rica** — `contains`/`find`/`update_quantity`/
+   `increment`/`decrement`/`replace`/`to_list`, protocolos `__len__`/
+   `__iter__`/`__contains__`, igualdade por `codigo`.
+7. **Fila de Impressão visual** — painel lateral (~30% da largura), botão
+   "Adicionar à Fila" (incrementa em vez de duplicar), "Remover", "Limpar
+   Fila", contadores sempre sincronizados com o `PrintQueue`.
+8. **Edição direta da quantidade** — botões `[-]`/`[+]`, duplo clique para
+   editar (Enter/perda de foco confirmam; valor inválido restaura o
+   anterior sem exceção), atalhos DEL e Ctrl+A.
+9. **Integração com o pipeline de impressão existente** — `PrintQueueAdapter`
+   (conversão pura, sem regra de impressão), botão "Imprimir Fila" em
+   thread separada, controles desabilitados durante a impressão,
+   confirmação de sucesso + limpeza opcional, erro nunca descarta a fila,
+   log em `data/print_log.txt`.
+10. **Eliminação de duplicação arquitetural** (refinamento final) —
+    `core/print_layout.py` centraliza toda constante física antes espalhada
+    entre `ZplBuilder`, `ui/main_window.py` e `ui/catalog_tab.py`;
+    `core/label_data.py` (`LabelData`) substitui o `list[dict]` entre
+    `PrintQueueAdapter` e `ZplBuilder.build_row()`.
+
+## Arquitetura final
+
+```
+Catálogo Integrado
+        │
+        ▼
+CatalogService.create_print_item()
+        │
+        ▼
+PrintQueue (add/increment/decrement/update_quantity/remove/clear)
+        │
+        ▼
+PrintQueueAdapter.to_label_data()
+        │
+        ▼
+LabelData
+        │
+        ▼
+ZplBuilder.build_row()          ◄── core/print_layout.py (constantes)
+        │
+        ▼
+PrinterService.print_raw()
+        │
+        ▼
+ELGIN L42PRO FULL
+```
+
+A aba "Impressão" (`ui/main_window.py`) converge no mesmo
+`ZplBuilder.build_row()`/`PrinterService.print_raw()`, construindo
+`LabelData` a partir do dicionário de produto da planilha antes de montar
+cada job em lote — nenhum código de impressão é duplicado entre as duas
+abas.
+
+## Regras arquiteturais consolidadas
+
+- Existe apenas um motor de impressão (`ZplBuilder` + `PrinterService`).
+- Constantes físicas de layout vivem só em `core/print_layout.py`.
+- `CatalogProduct` nunca tem quantidade — isso é sempre `PrintItem`.
+- A interface nunca manipula listas de `PrintItem` diretamente — sempre
+  via métodos públicos de `PrintQueue`.
+- `PrintQueueAdapter` só converte dados; nenhuma regra de impressão.
+- `CatalogRepository` é o único ponto que lê a `DataSource` do catálogo.
+- Preview (`LabelRenderer`) e impressão continuam pipelines
+  independentes.
+
+Ver `ARCHITECTURE.md` para o detalhamento completo, por módulo, dessas
+regras e das dependências entre eles.
+
+## Validação de equivalência
+
+A saída de `ZplBuilder.build()` e `build_row()` foi comparada byte a byte
+entre a versão anterior à etapa 10 (constantes duplicadas, `list[dict]`) e
+a versão final (`print_layout` centralizado, `LabelData` tipado), para
+produtos com valores normais, campos vazios e preço `None` —
+**idêntica em todos os cenários testados**. Nenhuma calibração física
+precisou ser revalidada na impressora.
+
+## Testes
+
+191 testes automatizados, 100% passando (`python -m unittest discover -s
+tests`), cobrindo: motor de impressão (ZPL, layout, constantes
+centralizadas), domínio de impressão (`PrintItem`, `PrintQueue`,
+`LabelData`, `PrintQueueAdapter`), domínio do catálogo (repositório,
+serviço, configuração, validador), e a integração completa na interface
+(fila visual, edição de quantidade, atalhos, fluxo de impressão com
+`build_row()`/`print_raw()` mocados — nenhum teste envia dados para uma
+impressora real).
+
+## Conclusão
+
+A arquitetura do Santa Rubi Label Studio é considerada **oficialmente
+congelada** nesta versão. O sistema tem hoje duas telas completas e um
+único motor de impressão compartilhado, sem duplicação de lógica ou de
+constantes físicas entre elas. Evoluções futuras devem seguir o roadmap em
+`ROADMAP.md` e preservar as regras arquiteturais listadas acima — qualquer
+mudança que exija duplicar `ZplBuilder`, `PrinterService` ou uma constante
+de layout deve ser tratada como um sinal de alerta, não como solução.

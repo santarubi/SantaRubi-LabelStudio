@@ -569,7 +569,6 @@ class MainWindow:
         printer = self.printer_var.get() or "Impressora padrão"
         layout = self.layout_var.get() or "Layout Padrão"
         status_text = self.batch_status_var.get() or self.status_var.get()
-        mode = "Impressão Rápida" if self.mode_var.get() == "quick" else "Impressão em Lote"
         self.bottom_status_var.set(
             f"Produtos carregados: {self.loaded_products_count} | Visíveis: {len(self.filtered_products)} | Selecionados: {self.selected_products_count} | Etiquetas: {self.labels_to_print_count} | Impressora: {printer} | Layout: {layout} | Status: {status_text}"
         )

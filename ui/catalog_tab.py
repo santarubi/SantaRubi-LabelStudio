@@ -1,16 +1,17 @@
 """Aba "Catálogo Integrado".
 
-Etapa 1 (concluída): configuração da fonte de dados (arquivo, abas,
-mapeamento de colunas) e teste de configuração.
+Configuração da fonte de dados (arquivo, abas, mapeamento de colunas),
+teste de configuração, tabela do catálogo (carregado em memória via
+CatalogRepository) e a Fila de Impressão (PrintQueue), incluindo o disparo
+da impressão reaproveitando o motor existente (ZplBuilder/PrinterService).
 
-Etapa 2 (concluída): carregamento completo do catálogo em memória.
+Esta classe é apenas apresentação: lê controles da interface, chama
+métodos de CatalogService/PrintQueue e atualiza tabela/cartões/contadores
+— nenhuma pesquisa, filtro, ordenação ou regra de negócio do catálogo é
+feita aqui. Toda essa lógica vive em core/catalog_service.py.
 
-Etapa 3 (esta): esta classe é apenas apresentação. Ela lê controles da
-interface, chama métodos de CatalogService e atualiza tabela/contadores —
-nenhuma pesquisa, filtro ou ordenação é feita aqui. Toda essa lógica vive em
-core/catalog_service.py.
-
-Fluxo: DataSource -> Repository -> CatalogService -> CatalogTab (interface).
+Fluxo: DataSource -> Repository -> CatalogService -> CatalogTab (interface)
+-> PrintQueue -> PrintQueueAdapter -> ZplBuilder -> PrinterService.
 """
 
 from __future__ import annotations
@@ -225,8 +226,7 @@ class CatalogTab:
         self.catalog_tree.heading("descricao", text="Descrição", command=lambda: self._on_sort_column("descricao"))
         self.catalog_tree.heading("categoria", text="Categoria", command=lambda: self._on_sort_column("categoria"))
         self.catalog_tree.heading("numeracao", text="Numeração", command=lambda: self._on_sort_column("numeracao"))
-        # Quantidade ainda não tem critério de ordenação no CatalogService
-        # nesta etapa (etapa é só de usabilidade, sem alterar o service) —
+        # Quantidade não tem critério de ordenação no CatalogService —
         # cabeçalho sem comando, só exibição.
         self.catalog_tree.heading("quantidade", text="Quantidade")
         self.catalog_tree.heading("preco", text="Preço", command=lambda: self._on_sort_column("preco"))
@@ -653,8 +653,7 @@ class CatalogTab:
         messagebox.showerror(APP_TITLE, f"Não foi possível concluir a impressão: {exc}")
 
     # ------------------------------------------------------------------
-    # Configuração: arquivo, abas, mapeamento (etapa 1 — inalterada em
-    # espírito, só passou a coexistir com a seção de catálogo abaixo)
+    # Configuração: arquivo, abas, mapeamento
     # ------------------------------------------------------------------
 
     def _get_repository(self, file_path: str | None = None) -> CatalogRepository:
