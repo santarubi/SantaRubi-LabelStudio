@@ -22,6 +22,12 @@ from core.zpl_builder import ZplBuilder
 APP_TITLE = "Santa Rubi Label Studio"
 WINDOW_SIZE = "1000x700"
 
+# O rolo de etiquetas é calibrado fisicamente para 3 colunas por linha.
+# Enviar um job ^XA mais estreito que essa largura faz a impressora repetir
+# o conteúdo nas colunas restantes (ver DOCUMENTACAO_CHECKPOINT.md, cap. 2.6).
+BATCH_ROW_COLUMNS = 3
+BATCH_COLUMN_PITCH = 264
+
 
 class MainWindow:
     def __init__(self, root: tk.Tk):
@@ -145,6 +151,7 @@ class MainWindow:
         ttk.Label(printer_panel, text="Impressora").grid(row=0, column=0, sticky="w", pady=(0, 4))
         self.printer_combobox = ttk.Combobox(printer_panel, textvariable=self.printer_var, state="readonly")
         self.printer_combobox.grid(row=1, column=0, sticky="ew")
+        self.printer_combobox.bind("<<ComboboxSelected>>", self._on_printer_selected)
 
         layout_panel = ttk.Frame(top_controls)
         layout_panel.grid(row=2, column=1, sticky="ew")
@@ -273,7 +280,7 @@ class MainWindow:
         self._load_printer_list()
 
     def _load_printer_list(self) -> None:
-        """Popula o combobox com as impressoras instaladas no Windows e seleciona a padrão."""
+        """Popula o combobox com as impressoras instaladas e seleciona a última utilizada."""
         printers = PrinterService().list_printers()
         self.printer_combobox["values"] = printers
 
@@ -281,11 +288,25 @@ class MainWindow:
             self.printer_var.set("")
             return
 
+        last_printer = self.config.get("last_printer")
+        if last_printer in printers:
+            self.printer_var.set(last_printer)
+            return
+
         default_printer = PrinterService().get_default_printer()
         if default_printer in printers:
             self.printer_var.set(default_printer)
         else:
             self.printer_var.set(printers[0])
+
+        if last_printer:
+            self.config["last_printer"] = self.printer_var.get()
+            self.config_manager.save(self.config)
+
+    def _on_printer_selected(self, _: Any = None) -> None:
+        """Salva a impressora escolhida como a última utilizada."""
+        self.config["last_printer"] = self.printer_var.get()
+        self.config_manager.save(self.config)
 
     def _build_batch_content(self):
         frame = ttk.LabelFrame(self.batch_frame, text="Configuração de impressão", padding=12)
@@ -735,21 +756,39 @@ class MainWindow:
         self.batch_thread.start()
 
     def _run_batch_print(self, products: list[dict[str, Any]]) -> None:
-        """Executa a impressão de cada produto em lote."""
+        """Executa a impressão em lote agrupando etiquetas em linhas de 3 colunas.
+
+        O rolo é calibrado fisicamente para 3 colunas por linha, então cada
+        job enviado precisa preencher a linha inteira (build_row) — um job de
+        coluna única faz a impressora repetir o conteúdo nas colunas restantes.
+        """
         try:
             self.printer_service = PrinterService(self.printer_var.get())
             zpl_builder = ZplBuilder()
-            total = len(products)
-            for index, product in enumerate(products, start=1):
+
+            labels: list[dict[str, Any]] = []
+            for product in products:
+                labels.extend([product] * self._parse_quantity(product.get("qtd")))
+
+            rows = [
+                labels[i : i + BATCH_ROW_COLUMNS]
+                for i in range(0, len(labels), BATCH_ROW_COLUMNS)
+            ]
+            total_rows = len(rows)
+
+            for index, row in enumerate(rows, start=1):
                 if self.batch_cancelled:
                     break
 
-                progress = index / total * 100
+                progress = index / total_rows * 100
                 self.root.after(0, self.batch_progress_var.set, progress)
-                self.root.after(0, self.batch_status_var.set, f"Imprimindo {index} de {total}...")
-                self.root.after(0, self.batch_current_var.set, f"Código: {product.get('codigo')}")
+                self.root.after(0, self.batch_status_var.set, f"Imprimindo linha {index} de {total_rows}...")
+                codigos = ", ".join(str(product.get("codigo")) for product in row)
+                self.root.after(0, self.batch_current_var.set, f"Código(s): {codigos}")
 
-                self.printer_service.print_raw(zpl_builder.build(product))
+                row_width = BATCH_COLUMN_PITCH * BATCH_ROW_COLUMNS
+                zpl = zpl_builder.build_row(row, column_pitch=BATCH_COLUMN_PITCH, total_width=row_width)
+                self.printer_service.print_raw(zpl)
                 time.sleep(0.05)
 
             if self.batch_cancelled:
@@ -786,7 +825,8 @@ class MainWindow:
 
             self.printer_service = PrinterService(self.printer_var.get())
             try:
-                self.printer_service.print_raw(ZplBuilder().build(self._current_product))
+                copies = self._parse_quantity(self._current_product.get("qtd"))
+                self.printer_service.print_raw(ZplBuilder().build(self._current_product), copies=copies)
                 self.status_var.set("Status: Etiqueta rápida enviada para impressão.")
             except Exception as exc:
                 self.status_var.set(f"Status: Falha ao imprimir a etiqueta rápida: {exc}")

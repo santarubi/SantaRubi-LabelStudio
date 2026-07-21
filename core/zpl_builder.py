@@ -160,12 +160,25 @@ class ZplBuilder:
         ]
         return "\n".join(lines)
 
-    def build_row(self, products: list[dict[str, Any]], column_pitch: int = LABEL_WIDTH_DOTS) -> str:
-        """Retorna o comando ZPL de várias etiquetas lado a lado num único
+    def build_row(
+        self,
+        products: list[dict[str, Any]],
+        column_pitch: int = LABEL_WIDTH_DOTS,
+        total_width: int | None = None,
+    ) -> str:
+        """Retorna o comando ZPL de 1 a N etiquetas lado a lado num único
         ^XA...^XZ, uma por coluna do rolo — para rolos com mais de uma
         etiqueta por linha (ex.: 3 colunas), em vez de repetir o job inteiro
-        (o que faz a impressora repetir a mesma etiqueta em cada coluna)."""
-        total_width = column_pitch * len(products)
+        (o que faz a impressora repetir a mesma etiqueta em cada coluna).
+
+        `total_width` permite manter a largura da linha fixa na largura
+        física total do rolo (ex.: column_pitch * 3 colunas) mesmo quando
+        `products` tem menos itens que o rolo comporta — as colunas sem
+        produto correspondente simplesmente não recebem nenhum campo, e
+        ficam em branco. Se omitido, a largura é `column_pitch * len(products)`
+        (comportamento original, para quando a lista já preenche a linha)."""
+        if total_width is None:
+            total_width = column_pitch * len(products)
 
         lines = ["^XA", "^CI28", f"^PW{total_width}", f"^LL{LABEL_HEIGHT_DOTS}"]
         for index, product in enumerate(products):
