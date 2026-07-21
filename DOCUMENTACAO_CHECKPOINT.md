@@ -763,3 +763,87 @@ protocolo de impressão que lutava contra os limites do driver Windows.
 *(A criação da tag em si não foi executada por este documento — é uma
 recomendação para o desenvolvedor/mantenedor confirmar e aplicar após
 revisar e commitar as mudanças.)*
+
+---
+
+## 16. Marco v1.1-smart-print
+
+**Commit da funcionalidade:** `530a2a89876e9bd458e67aa51bb7214b31652d8b`
+**Tag:** `v1.1-smart-print`
+
+### Objetivo da evolução
+
+Sobre a base estável de [v1.0-print-engine](#15-marco-da-versão), esta fase
+resolveu a limitação conhecida documentada no Capítulo 11 da versão
+anterior: a impressão em lote enviava um job ZPL de coluna única por
+produto, o que, no rolo físico calibrado para 3 colunas, arriscava
+reproduzir o bug de replicação (Capítulo 2.6) e ignorava a quantidade (`qtd`)
+de cada produto. O objetivo foi tornar a impressão "inteligente" o
+suficiente para agrupar corretamente qualquer volume de etiquetas nas
+colunas físicas do rolo, sem exigir nenhuma alteração no pipeline RAW+ZPL
+já consolidado.
+
+### Funcionalidades implementadas
+
+- **Memória da última impressora utilizada**: `_load_printer_list()` passa a
+  restaurar `last_printer` de `config.json` (via `ConfigManager`, já
+  existente) e a salvar a escolha automaticamente ao trocar de impressora
+  (`_on_printer_selected`, ligado a `<<ComboboxSelected>>`). Se a impressora
+  salva não existir mais, cai para a padrão do Windows e atualiza a
+  configuração.
+- **Respeito à quantidade do produto**: os pontos de impressão passam a
+  usar a quantidade (`qtd`) de cada produto para determinar quantas
+  etiquetas realmente sair da impressora, em vez de sempre uma por produto.
+- **Impressão em lote agrupada por linha de 3 colunas** (`_run_batch_print`):
+  a lista de produtos é expandida por quantidade e agrupada em blocos de
+  até 3 "etiquetas físicas", cada bloco enviado como **um único** job
+  `ZplBuilder.build_row()` — em vez de um job por produto.
+- **`build_row()` refinado para aceitar 1, 2 ou 3 produtos sem preenchimento
+  fictício**: novo parâmetro opcional `total_width` desacopla a largura
+  física do job (sempre a largura calibrada do rolo) da quantidade de
+  produtos realmente fornecidos. Colunas sem produto correspondente não
+  recebem nenhum campo ZPL — nem mesmo o resíduo `"R$"` que a abordagem
+  anterior (preencher com `{}`) produzia.
+- **Cobertura de teste para `ZplBuilder`**: `tests/test_zpl_builder.py`
+  (novo) cobre `build_row()` com 1, 2 e 3 produtos, confirmando ausência de
+  campos/residuais em colunas vazias — fechando a lacuna de testes
+  registrada no roadmap da versão anterior.
+
+### Validação física realizada
+
+Testado fisicamente na ELGIN L42PRO FULL, com resultado confirmado pelo
+usuário para todos os cenários:
+
+| Cenário | Resultado |
+|---|---|
+| Impressão em 1 coluna | OK |
+| Impressão em 2 colunas | OK |
+| Impressão em 3 colunas | OK |
+| Agrupamento automático (quantidades que cruzam múltiplas linhas de 3) | OK |
+| Quantidades (`qtd` respeitada por etiqueta) | OK |
+| Alinhamento | OK |
+| Código de barras | OK |
+| Layout geral | OK |
+| Regressões | Nenhuma observada |
+
+### Preservação da arquitetura
+
+Nenhuma mudança tocou o pipeline RAW+ZPL em si (`PrinterService.print_raw`
+permanece idêntico), nem o mecanismo de preview (`LabelRenderer`
+inalterado, preview continua independente). A única mudança em
+`core/zpl_builder.py` foi a adição do parâmetro opcional `total_width` em
+`build_row()` — retrocompatível, sem alterar `build()` nem o formato ZPL
+gerado para etiquetas já existentes. Toda a lógica de agrupamento por linha
+vive em `ui/main_window.py`, mantendo `ZplBuilder` e `PrinterService` como
+módulos de responsabilidade única, sem duplicação de lógica.
+
+### Conclusão
+
+Com a validação física confirmando todos os cenários de coluna, quantidade
+e agrupamento sem regressão, **o módulo de impressão do Santa Rubi Label
+Studio passa a ser considerado estável e concluído** nesta versão. Futuras
+mudanças no módulo de impressão devem ser tratadas como evolução incremental
+sobre `v1.1-smart-print`, seguindo o mesmo princípio que preservou
+`v1.0-print-engine`: preservar a arquitetura consolidada, evitar
+refatorações, e validar fisicamente somente quando uma funcionalidade
+estiver completa.
