@@ -16,18 +16,15 @@ from PIL import Image, ImageTk
 
 from core.config import ConfigManager
 from core.excel_reader import ExcelReader
+from core.label_data import LabelData
 from core.label_renderer import LabelRenderer
+from core.print_layout import BATCH_COLUMN_PITCH, BATCH_ROW_COLUMNS
 from core.printer import PrinterService
 from core.zpl_builder import ZplBuilder
+from ui.catalog_tab import CatalogTab
 
 APP_TITLE = "Santa Rubi Label Studio"
 WINDOW_SIZE = "1000x700"
-
-# O rolo de etiquetas é calibrado fisicamente para 3 colunas por linha.
-# Enviar um job ^XA mais estreito que essa largura faz a impressora repetir
-# o conteúdo nas colunas restantes (ver DOCUMENTACAO_CHECKPOINT.md, cap. 2.6).
-BATCH_ROW_COLUMNS = 3
-BATCH_COLUMN_PITCH = 264
 
 CATEGORY_ALL = "Todos"
 
@@ -124,7 +121,13 @@ class MainWindow:
         )
 
     def _build_widgets(self):
-        main_container = ttk.Frame(self.root, style="Content.TFrame", padding=16)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+
+        print_tab = ttk.Frame(self.notebook)
+        self.notebook.add(print_tab, text="Impressão")
+
+        main_container = ttk.Frame(print_tab, style="Content.TFrame", padding=16)
         main_container.pack(fill="both", expand=True)
         main_container.grid_columnconfigure(0, weight=1)
         main_container.grid_rowconfigure(2, weight=1)
@@ -310,6 +313,10 @@ class MainWindow:
 
         self.root.bind_all("<Control-f>", self._on_ctrl_f_shortcut)
         self.root.bind_all("<Control-F>", self._on_ctrl_f_shortcut)
+
+        catalog_tab_frame = ttk.Frame(self.notebook)
+        self.notebook.add(catalog_tab_frame, text="Catálogo Integrado")
+        self.catalog_tab = CatalogTab(catalog_tab_frame, self.config_manager, self.config)
 
     def _load_printer_list(self) -> None:
         """Popula o combobox com as impressoras instaladas e seleciona a última utilizada."""
@@ -975,9 +982,16 @@ class MainWindow:
             self.printer_service = PrinterService(self.printer_var.get())
             zpl_builder = ZplBuilder()
 
-            labels: list[dict[str, Any]] = []
+            labels: list[LabelData] = []
             for product in products:
-                labels.extend([product] * self._parse_quantity(product.get("qtd")))
+                label = LabelData(
+                    codigo=product.get("codigo"),
+                    descricao=product.get("descricao"),
+                    categoria=product.get("categoria"),
+                    numero=product.get("numero"),
+                    preco=product.get("preco"),
+                )
+                labels.extend([label] * self._parse_quantity(product.get("qtd")))
 
             rows = [
                 labels[i : i + BATCH_ROW_COLUMNS]
@@ -992,7 +1006,7 @@ class MainWindow:
                 progress = index / total_rows * 100
                 self.root.after(0, self.batch_progress_var.set, progress)
                 self.root.after(0, self.batch_status_var.set, f"Imprimindo linha {index} de {total_rows}...")
-                codigos = ", ".join(str(product.get("codigo")) for product in row)
+                codigos = ", ".join(str(label.codigo) for label in row)
                 self.root.after(0, self.batch_current_var.set, f"Código(s): {codigos}")
 
                 row_width = BATCH_COLUMN_PITCH * BATCH_ROW_COLUMNS

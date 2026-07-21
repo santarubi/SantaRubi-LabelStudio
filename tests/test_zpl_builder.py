@@ -1,5 +1,6 @@
 import unittest
 
+from core.label_data import LabelData
 from core.zpl_builder import ZplBuilder
 
 
@@ -10,13 +11,13 @@ class ZplBuilderRowTests(unittest.TestCase):
         self.total_width = self.column_pitch * 3
 
     def _product(self, codigo):
-        return {
-            "codigo": codigo,
-            "categoria": "CATEGORIA",
-            "descricao": "DESCRICAO",
-            "numero": "10",
-            "preco": 9.9,
-        }
+        return LabelData(
+            codigo=codigo,
+            categoria="CATEGORIA",
+            descricao="DESCRICAO",
+            numero="10",
+            preco=9.9,
+        )
 
     def _expected_fields(self, products):
         fields = []
@@ -57,6 +58,33 @@ class ZplBuilderRowTests(unittest.TestCase):
         products = [self._product("111111"), self._product("222222")]
         zpl = self.builder.build_row(products, column_pitch=self.column_pitch)
         self.assertIn(f"^PW{self.column_pitch * len(products)}", zpl)
+
+
+class ZplBuilderBuildAcceptsDictTests(unittest.TestCase):
+    """build() continua aceitando dict (usado pela impressão unitária/teste
+    da aba "Impressão") — internamente converte para LabelData antes de
+    montar os campos, sem alterar nenhum cálculo/posicionamento."""
+
+    def test_build_from_dict_matches_build_row_from_equivalent_label_data(self):
+        builder = ZplBuilder()
+        product_dict = {
+            "codigo": "111111",
+            "categoria": "CATEGORIA",
+            "descricao": "DESCRICAO",
+            "numero": "10",
+            "preco": 9.9,
+        }
+
+        zpl_from_dict = builder.build(product_dict)
+
+        label = LabelData(**product_dict)
+        zpl_from_row = builder.build_row([label], column_pitch=240, total_width=240)
+
+        # build() usa ^PW/^LL de uma etiqueta só; build_row() com uma coluna
+        # e mesma largura produz exatamente os mesmos campos internos.
+        for line in builder._build_fields(label):
+            self.assertIn(line, zpl_from_dict)
+            self.assertIn(line, zpl_from_row)
 
 
 if __name__ == "__main__":

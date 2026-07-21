@@ -24,3 +24,4 @@ desktop.ini
 # Arquivos de dados locais (planilhas de teste, saídas geradas)
 data/*
 !data/.gitkeep
+.claude/

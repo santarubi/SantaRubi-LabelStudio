@@ -6,6 +6,9 @@ bruto ("RAW") direto para a impressora — sem passar pelo driver Windows, sem
 DEVMODE, sem a margem de segurança que o driver GDI impõe. O firmware da
 impressora desenha o código de barras, o texto e o posicionamento na
 resolução nativa (203 dpi = 240x120 dots para a etiqueta de 30x15mm).
+
+Todas as constantes físicas de layout vêm de core.print_layout — este
+módulo não declara nenhum valor próprio, para nunca duplicar calibração.
 """
 
 from __future__ import annotations
@@ -13,72 +16,56 @@ from __future__ import annotations
 import math
 from typing import Any
 
-LABEL_WIDTH_DOTS = 240
-LABEL_HEIGHT_DOTS = 120
+from core import print_layout
+from core.label_data import LabelData
 
-# Estimativa de largura média de caractere, como fração do parâmetro de
-# largura pedido — usada só para truncar com segurança em Python, já que a
-# impressora não faz "..." sozinha, e um campo que não cabe no ^FB (lines=1)
-# fica sobreposto/ilegível em vez de simplesmente cortar.
-# 0,6 ficou curto demais; 0,45 sobrepôs; 0,55 é o meio-termo comprovadamente
-# seguro (validado em várias impressões).
-BOLD_CHAR_WIDTH_RATIO = 0.55
-REGULAR_CHAR_WIDTH_RATIO = 0.55
+LABEL_WIDTH_DOTS = print_layout.LABEL_WIDTH_DOTS
+LABEL_HEIGHT_DOTS = print_layout.LABEL_HEIGHT_DOTS
 
-# Tentativa de usar a fonte D para tirar o negrito de categoria/descrição/
-# número sobrepôs texto DUAS vezes seguidas, mesmo depois de reduzir bastante
-# o tamanho pedido — a fonte D não escala de forma confiável nessa
-# impressora. Revertido para a fonte 0 em tudo (estado validado antes desse
-# pedido) em vez de arriscar mais uma etiqueta em outra tentativa às cegas.
-BOLD_FONT = "0"
-REGULAR_FONT = "0"
+BOLD_CHAR_WIDTH_RATIO = print_layout.BOLD_CHAR_WIDTH_RATIO
+REGULAR_CHAR_WIDTH_RATIO = print_layout.REGULAR_CHAR_WIDTH_RATIO
+BOLD_FONT = print_layout.BOLD_FONT
+REGULAR_FONT = print_layout.REGULAR_FONT
 
 
 class ZplBuilder:
     """Monta o comando ZPL de uma etiqueta a partir dos dados do produto."""
 
-    LEFT_MARGIN = 38
-    RIGHT_MARGIN = 12
+    LEFT_MARGIN = print_layout.LEFT_MARGIN
+    RIGHT_MARGIN = print_layout.RIGHT_MARGIN
 
-    BARCODE_TOP = 6
-    BARCODE_HEIGHT = 30
-    BARCODE_MODULE_WIDTH = 2
+    BARCODE_TOP = print_layout.BARCODE_TOP
+    BARCODE_HEIGHT = print_layout.BARCODE_HEIGHT
+    BARCODE_MODULE_WIDTH = print_layout.BARCODE_MODULE_WIDTH
 
     # Ajuste fino de alinhamento visual: desloca só o bloco código de barras +
     # código impresso abaixo dele, mantendo o alinhamento relativo entre os
     # dois. Não afeta os demais campos nem a largura calculada do símbolo.
-    BARCODE_VISUAL_OFFSET_X = 6
+    BARCODE_VISUAL_OFFSET_X = print_layout.BARCODE_VISUAL_OFFSET_X
 
     # Estrutura fixa de um símbolo Code128: cada caractere (start, dados,
     # checksum) ocupa 11 módulos; o stop ocupa 13 (11 + barra de terminação
     # de 2 módulos) — Zebra ZPL II Programming Guide, comando ^BC.
-    CODE128_SYMBOL_MODULES = 11
-    CODE128_STOP_MODULES = 13
+    CODE128_SYMBOL_MODULES = print_layout.CODE128_SYMBOL_MODULES
+    CODE128_STOP_MODULES = print_layout.CODE128_STOP_MODULES
 
     # Código: centralizado em linha própria, logo abaixo do barcode.
-    CODE_ROW_Y = 44
-    CODE_FONT_SIZE = 20
+    CODE_ROW_Y = print_layout.CODE_ROW_Y
+    CODE_FONT_SIZE = print_layout.CODE_FONT_SIZE
 
     # Categoria: linha própria, abaixo do código, alinhada à direita.
-    CATEGORY_ROW_Y = 66
-    CATEGORY_FONT_SIZE = 13
+    CATEGORY_ROW_Y = print_layout.CATEGORY_ROW_Y
+    CATEGORY_FONT_SIZE = print_layout.CATEGORY_FONT_SIZE
 
-    DESCRIPTION_ROW_Y = 81
-    DESCRIPTION_FONT_SIZE = 15
-    # Corte por quantidade de caracteres, sem cálculo de largura: a impressora
-    # decide a quebra/ajuste real. Ajustar este valor conforme teste físico.
-    DESCRIPTION_MAX_CHARS = 26
-    # Margem direita própria da descrição, menor que RIGHT_MARGIN (12):
-    # LEFT_MARGIN (38) é zona morta de hardware confirmada fisicamente e não
-    # é reduzida aqui; a direita nunca teve essa confirmação, e a descrição
-    # não compartilha linha com nenhum outro campo, então aproveita mais
-    # espaço sem risco de invadir código/categoria/número/preço.
-    DESCRIPTION_RIGHT_MARGIN = 4
+    DESCRIPTION_ROW_Y = print_layout.DESCRIPTION_ROW_Y
+    DESCRIPTION_FONT_SIZE = print_layout.DESCRIPTION_FONT_SIZE
+    DESCRIPTION_MAX_CHARS = print_layout.DESCRIPTION_MAX_CHARS
+    DESCRIPTION_RIGHT_MARGIN = print_layout.DESCRIPTION_RIGHT_MARGIN
 
-    LAST_ROW_Y = 98
-    NUMBER_FONT_SIZE = 13
-    NUMBER_COLUMN_WIDTH = 55
-    PRICE_FONT_SIZE = 18
+    LAST_ROW_Y = print_layout.LAST_ROW_Y
+    NUMBER_FONT_SIZE = print_layout.NUMBER_FONT_SIZE
+    NUMBER_COLUMN_WIDTH = print_layout.NUMBER_COLUMN_WIDTH
+    PRICE_FONT_SIZE = print_layout.PRICE_FONT_SIZE
 
     def _format_value(self, value: Any) -> str:
         """Formata valores para exibição na etiqueta."""
@@ -120,15 +107,15 @@ class ZplBuilder:
             return text[:max_chars]
         return text[: max_chars - 3].rstrip() + "..."
 
-    def _build_fields(self, product: dict[str, Any], x_offset: int = 0) -> list[str]:
+    def _build_fields(self, label: LabelData, x_offset: int = 0) -> list[str]:
         """Monta só os campos (^FO/^BC/^FD/^FS) de uma etiqueta, deslocados
         horizontalmente por x_offset — usado tanto para uma etiqueta isolada
         quanto para várias etiquetas lado a lado num rolo de várias colunas."""
-        codigo = self._escape(self._format_value(product.get("codigo")))
-        categoria = self._escape(self._format_value(product.get("categoria")))
-        descricao = self._escape(self._format_value(product.get("descricao")))
-        numero = self._escape(self._format_value(product.get("numero")))
-        preco = f"R$ {self._format_value(product.get('preco'))}"
+        codigo = self._escape(self._format_value(label.codigo))
+        categoria = self._escape(self._format_value(label.categoria))
+        descricao = self._escape(self._format_value(label.descricao))
+        numero = self._escape(self._format_value(label.numero))
+        preco = f"R$ {self._format_value(label.preco)}"
 
         left = x_offset + self.LEFT_MARGIN
         content_width = LABEL_WIDTH_DOTS - self.LEFT_MARGIN - self.RIGHT_MARGIN
@@ -189,6 +176,19 @@ class ZplBuilder:
 
         return lines
 
+    @staticmethod
+    def _to_label_data(product: dict[str, Any]) -> LabelData:
+        """Ponte para quem ainda chama build() com um dict (ex.: impressão
+        unitária/teste na aba "Impressão") — _build_fields() só entende
+        LabelData; nenhum cálculo/posicionamento muda, só o tipo de entrada."""
+        return LabelData(
+            codigo=product.get("codigo"),
+            descricao=product.get("descricao"),
+            categoria=product.get("categoria"),
+            numero=product.get("numero"),
+            preco=product.get("preco"),
+        )
+
     def build(self, product: dict[str, Any]) -> str:
         """Retorna o comando ZPL completo (^XA...^XZ) para uma única etiqueta."""
         lines = [
@@ -196,14 +196,14 @@ class ZplBuilder:
             "^CI28",
             f"^PW{LABEL_WIDTH_DOTS}",
             f"^LL{LABEL_HEIGHT_DOTS}",
-            *self._build_fields(product),
+            *self._build_fields(self._to_label_data(product)),
             "^XZ",
         ]
         return "\n".join(lines)
 
     def build_row(
         self,
-        products: list[dict[str, Any]],
+        products: list[LabelData],
         column_pitch: int = LABEL_WIDTH_DOTS,
         total_width: int | None = None,
     ) -> str:
