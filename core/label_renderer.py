@@ -8,98 +8,128 @@ from __future__ import annotations
 
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageFont
 
 from core.barcode import BarcodeGenerator
+
+BLACK = "#000000"
 
 
 class LabelRenderer:
     """Responsável por renderizar a etiqueta em um canvas Tkinter."""
 
+    LABEL_WIDTH = 240
+    LABEL_HEIGHT = 120
+
     def __init__(self, canvas: Any):
         self.canvas = canvas
 
+    # SAFE_RIGHT=230/235 cortaram categoria/preço em duas rodadas seguidas —
+    # 218 foi o último valor confirmado sem corte, então voltei a ele em vez
+    # de insistir mais à direita. Para "jogar tudo mais para a direita" sem
+    # arriscar a direita de novo, subi o SAFE_LEFT bem mais (havia folga
+    # sobrando à esquerda na foto), estreitando a área em vez de deslocá-la.
+    SAFE_LEFT = 45
+    SAFE_RIGHT = 218  # último valor confirmado sem corte
+    CENTER_X = (SAFE_LEFT + SAFE_RIGHT) // 2  # 131
+    CENTER_CONTENT_WIDTH = SAFE_RIGHT - SAFE_LEFT  # 173
+
+    RIGHT_EDGE = SAFE_RIGHT
+    RIGHT_MAX_WIDTH = CENTER_CONTENT_WIDTH
+
+    LEFT_EDGE = SAFE_LEFT
+
+    # Barcode colado na borda superior, e altura reduzida (estava alto demais).
+    BARCODE_TOP = 1
+    BARCODE_HEIGHT = 38
+    BARCODE_WIDTH = CENTER_CONTENT_WIDTH
+
+    # Linhas recalculadas a partir do novo topo/altura do barcode.
+    CODE_ROW_Y = 40
+    CATEGORY_ROW_Y = 57
+    DESCRIPTION_ROW_Y = 73
+    LAST_ROW_Y = 88
+
+    CODE_FONT_SIZE = 16
+    CATEGORY_FONT_SIZE = 15
+    DESCRIPTION_FONT_SIZE = 13
+    NUMBER_FONT_SIZE = 13
+    PRICE_FONT_SIZE = 18
+
+    # Só negrito: em resolução térmica baixa, traços finos de fonte regular
+    # se quebram ("falhado") no threshold do driver. Negrito sobrevive bem.
+    FONT_PREFERENCES = (
+        "DejaVuSans-Bold.ttf",
+        "arialbd.ttf",
+        "LiberationSans-Bold.ttf",
+        "NotoSans-Bold.ttf",
+    )
+
+    def _load_font(self, size: int) -> Any:
+        """Carrega a primeira fonte TrueType em negrito disponível."""
+        for font_name in self.FONT_PREFERENCES:
+            try:
+                return ImageFont.truetype(font_name, size)
+            except OSError:
+                continue
+        return ImageFont.load_default(size=size)
+
     def render_image(self, product: dict[str, Any]) -> Image.Image:
-        """Gera uma imagem Pillow da etiqueta com o mesmo layout visual da pré-visualização."""
-        image = Image.new("RGBA", (300, 220), "white")
+        """Gera a etiqueta 240x120: barcode grande colado no topo, código
+        centralizado logo abaixo, categoria à direita, descrição centralizada
+        e número (esquerda) + preço (direita) na última linha.
+        """
+        image = Image.new("RGB", (self.LABEL_WIDTH, self.LABEL_HEIGHT), "white")
         draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-        draw.rectangle((10, 10, 289, 209), outline="#0f172a", width=2)
-        draw.rectangle((30, 30, 269, 69), outline="#475569", width=1)
+
+        font_codigo = self._load_font(self.CODE_FONT_SIZE)
+        font_categoria = self._load_font(self.CATEGORY_FONT_SIZE)
+        font_descricao = self._load_font(self.DESCRIPTION_FONT_SIZE)
+        font_numero = self._load_font(self.NUMBER_FONT_SIZE)
+        font_preco = self._load_font(self.PRICE_FONT_SIZE)
 
         codigo = self._format_value(product.get("codigo"))
-        if codigo != "—":
-            barcode_image = BarcodeGenerator(codigo).generate_image(width=180, height=38)
-            image.paste(barcode_image, (60, 30), barcode_image)
-        else:
-            draw.text((110, 40), "BARCODE", font=font, fill="#334155")
-
         categoria = self._format_value(product.get("categoria"))
         descricao = self._format_value(product.get("descricao"))
         numero = self._format_value(product.get("numero"))
-        preco = self._format_value(product.get("preco"))
+        preco_texto = f"R$ {self._format_value(product.get('preco'))}"
 
-        draw.text((110, 80), codigo, font=font, fill="#111827")
-        draw.text((110, 100), categoria, font=font, fill="#334155")
-
-        description_lines = self._wrap_text(descricao, 26)
-        y_position = 124
-        for line in description_lines:
-            draw.text((50, y_position), line, font=font, fill="#0f172a")
-            y_position += 12
-
-        if numero != "—":
-            draw.text((40, 165), numero, font=font, fill="#0f172a")
-
-        draw.text((180, 165), f"R$ {preco}", font=font, fill="#0f172a")
-
-        return image
-
-    def draw_placeholder(self) -> None:
-        """Desenha a pré-visualização vazia da etiqueta."""
-        self.canvas.delete("all")
-        self.canvas.create_rectangle(10, 10, 290, 210, outline="#cbd5e1", width=2)
-        self.canvas.create_text(
-            150,
-            110,
-            text="Pré-visualização da etiqueta",
-            font=("Segoe UI", 10, "bold"),
-            fill="#64748b",
-        )
-
-    def draw_label(self, product: dict[str, Any]) -> None:
-        """Desenha a etiqueta com os dados do produto."""
-        self.canvas.delete("all")
-        self.canvas.create_rectangle(10, 10, 290, 210, outline="#0f172a", width=2)
-
-        self.canvas.create_rectangle(30, 30, 270, 70, outline="#475569", width=1)
-
-        codigo = self._format_value(product.get("codigo"))
         if codigo != "—":
-            barcode_image = BarcodeGenerator(codigo).generate_image(width=180, height=38)
-            photo = ImageTk.PhotoImage(barcode_image)
-            self.canvas.image = photo
-            self.canvas.create_image(150, 50, image=photo)
+            barcode_image = BarcodeGenerator(codigo).generate_image(
+                width=self.BARCODE_WIDTH, height=self.BARCODE_HEIGHT, show_text=False
+            )
+            barcode_x = self.CENTER_X - self.BARCODE_WIDTH // 2
+            image.paste(barcode_image, (barcode_x, self.BARCODE_TOP), barcode_image)
         else:
-            self.canvas.create_text(150, 50, text="BARCODE", font=("Segoe UI", 10, "bold"), fill="#334155")
-        categoria = self._format_value(product.get("categoria"))
-        descricao = self._format_value(product.get("descricao"))
-        numero = self._format_value(product.get("numero"))
-        preco = self._format_value(product.get("preco"))
+            self._draw_centered(draw, "BARCODE", font_codigo, self.BARCODE_TOP + 15, BLACK)
 
-        self.canvas.create_text(150, 85, text=codigo, font=("Segoe UI", 10, "bold"), fill="#111827")
-        self.canvas.create_text(150, 105, text=categoria, font=("Segoe UI", 9), fill="#334155")
+        codigo_linha = self._truncate_text(draw, codigo, font_codigo, self.CENTER_CONTENT_WIDTH)
+        self._draw_centered(draw, codigo_linha, font_codigo, self.CODE_ROW_Y, BLACK)
 
-        description_lines = self._wrap_text(descricao, 26)
-        y_position = 126
-        for line in description_lines:
-            self.canvas.create_text(150, y_position, text=line, font=("Segoe UI", 8), fill="#0f172a")
-            y_position += 12
+        categoria_linha = self._truncate_text(draw, categoria, font_categoria, self.RIGHT_MAX_WIDTH)
+        categoria_x = self.RIGHT_EDGE - draw.textlength(categoria_linha, font=font_categoria)
+        draw.text((categoria_x, self.CATEGORY_ROW_Y), categoria_linha, font=font_categoria, fill=BLACK)
+
+        descricao_linha = self._truncate_text(draw, descricao, font_descricao, self.CENTER_CONTENT_WIDTH)
+        self._draw_centered(draw, descricao_linha, font_descricao, self.DESCRIPTION_ROW_Y, BLACK)
 
         if numero != "—":
-            self.canvas.create_text(90, 175, text=numero, font=("Segoe UI", 9, "bold"), fill="#0f172a")
+            numero_linha = self._truncate_text(draw, numero, font_numero, self.RIGHT_EDGE - self.LEFT_EDGE)
+            draw.text((self.LEFT_EDGE, self.LAST_ROW_Y), numero_linha, font=font_numero, fill=BLACK)
 
-        self.canvas.create_text(220, 175, text=f"R$ {preco}", font=("Segoe UI", 9, "bold"), fill="#0f172a")
+        preco_linha = self._truncate_text(draw, preco_texto, font_preco, self.RIGHT_MAX_WIDTH)
+        preco_x = self.RIGHT_EDGE - draw.textlength(preco_linha, font=font_preco)
+        draw.text((preco_x, self.LAST_ROW_Y), preco_linha, font=font_preco, fill=BLACK)
+
+        # Threshold duro (sem anti-aliasing) para preto/branco puro: evita que
+        # bordas cinzas dos textos sejam ditheradas de forma inconsistente
+        # pelo driver da impressora térmica, causando o efeito "falhado".
+        return image.convert("L").point(lambda p: 0 if p < 160 else 255).convert("RGB")
+
+    def _draw_centered(self, draw: ImageDraw.ImageDraw, text: str, font: Any, y: int, fill: str) -> None:
+        """Desenha uma linha de texto centralizada horizontalmente no canvas."""
+        width = draw.textlength(text, font=font)
+        draw.text((self.CENTER_X - width / 2, y), text, font=font, fill=fill)
 
     def _format_value(self, value: Any) -> str:
         """Formata valores para exibição na etiqueta."""
@@ -109,21 +139,14 @@ class LabelRenderer:
             return f"{value:.2f}"
         return str(value)
 
-    def _wrap_text(self, text: str, max_chars: int) -> list[str]:
-        """Quebra o texto em várias linhas para caber no espaço da etiqueta."""
-        words = text.split()
-        lines: list[str] = []
-        current_line = ""
+    def _truncate_text(self, draw: ImageDraw.ImageDraw, text: str, font: Any, max_width: int) -> str:
+        """Trunca o texto com reticências para caber em uma única linha de max_width pixels."""
+        if draw.textlength(text, font=font) <= max_width:
+            return text
 
-        for word in words:
-            if len(current_line) + len(word) + 1 <= max_chars:
-                current_line = f"{current_line} {word}".strip()
-            else:
-                if current_line:
-                    lines.append(current_line)
-                current_line = word
+        ellipsis = "..."
+        truncated = text
+        while truncated and draw.textlength(truncated + ellipsis, font=font) > max_width:
+            truncated = truncated[:-1]
 
-        if current_line:
-            lines.append(current_line)
-
-        return lines or [text]
+        return f"{truncated.rstrip()}{ellipsis}" if truncated else ellipsis

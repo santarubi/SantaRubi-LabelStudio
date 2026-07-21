@@ -16,7 +16,7 @@ class LabelRendererTests(unittest.TestCase):
 
         image = renderer.render_image(product)
 
-        self.assertEqual(image.size, (300, 220))
+        self.assertEqual(image.size, (240, 120))
 
 
 if __name__ == "__main__":

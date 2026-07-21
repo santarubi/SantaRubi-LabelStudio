@@ -1,27 +1,19 @@
 """Impressão da etiqueta para a impressora Windows.
 
-Este módulo recebe a imagem já preparada pelo renderer e a envia para a
-impressora selecionada pelo usuário. A lógica de layout da etiqueta continua
-no renderer e não é redesenhada aqui.
+Este módulo envia o comando ZPL já montado pelo ZplBuilder direto para a
+impressora ("RAW"), sem passar pelo driver GDI do Windows.
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 try:
     import win32print
-    import win32ui
-    from PIL import Image, ImageWin
 except ImportError:  # pragma: no cover - ambiente sem dependências Windows
     win32print = None
-    win32ui = None
-    Image = None
-    ImageWin = None
 
 
 class PrinterService:
-    """Responsável por enviar uma imagem para a impressora Windows."""
+    """Responsável por enviar dados para a impressora Windows."""
 
     def __init__(self, printer_name: str | None = None):
         self.printer_name = printer_name
@@ -43,9 +35,19 @@ class PrinterService:
             printers = []
         return printers
 
-    def print_image(self, image: Any, copies: int = 1) -> None:
-        """Envia uma imagem para a impressora selecionada."""
-        if win32print is None or win32ui is None or Image is None or ImageWin is None:
+    def get_default_printer(self) -> str | None:
+        """Retorna o nome da impressora padrão configurada no Windows, se houver."""
+        if win32print is None:
+            return None
+
+        try:
+            return win32print.GetDefaultPrinter()
+        except Exception:
+            return None
+
+    def print_raw(self, data: str, copies: int = 1) -> None:
+        """Envia dados brutos (ex.: ZPL) direto para a impressora, sem GDI/DEVMODE."""
+        if win32print is None:
             raise RuntimeError("Bibliotecas de impressão do Windows não estão disponíveis.")
 
         if not self.printer_name:
@@ -54,19 +56,18 @@ class PrinterService:
         if copies < 1:
             copies = 1
 
-        image = image.convert("RGBA")
-        image = image.resize((300, 220), Image.LANCZOS)
+        payload = data.encode("utf-8")
 
-        hdc = win32ui.CreateDC()
-        hdc.CreatePrinterDC(self.printer_name)
-        hdc.StartDoc("Santa Rubi Label Studio")
-
+        hprinter = win32print.OpenPrinter(self.printer_name)
         try:
-            dib = ImageWin.Dib(image)
-            for _ in range(copies):
-                hdc.StartPage()
-                dib.draw(hdc.GetHandleOutput(), (0, 0, image.width, image.height))
-                hdc.EndPage()
+            job_info = ("Santa Rubi Label Studio (RAW)", None, "RAW")
+            win32print.StartDocPrinter(hprinter, 1, job_info)
+            try:
+                for _ in range(copies):
+                    win32print.StartPagePrinter(hprinter)
+                    win32print.WritePrinter(hprinter, payload)
+                    win32print.EndPagePrinter(hprinter)
+            finally:
+                win32print.EndDocPrinter(hprinter)
         finally:
-            hdc.EndDoc()
-            hdc.DeleteDC()
+            win32print.ClosePrinter(hprinter)

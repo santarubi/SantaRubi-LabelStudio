@@ -17,6 +17,7 @@ from core.config import ConfigManager
 from core.excel_reader import ExcelReader
 from core.label_renderer import LabelRenderer
 from core.printer import PrinterService
+from core.zpl_builder import ZplBuilder
 
 APP_TITLE = "Santa Rubi Label Studio"
 WINDOW_SIZE = "1000x700"
@@ -32,7 +33,7 @@ class MainWindow:
 
         self.mode_var = tk.StringVar(value="batch")
         self.excel_path_var = tk.StringVar()
-        self.printer_var = tk.StringVar(value="Impressora padrão")
+        self.printer_var = tk.StringVar(value="")
         self.layout_var = tk.StringVar(value="Layout Padrão")
         self.quantity_mode_var = tk.StringVar(value="all")
         self.from_var = tk.StringVar()
@@ -60,7 +61,6 @@ class MainWindow:
         if self.config.get("last_mode") in ("batch", "quick"):
             self.mode_var.set(self.config["last_mode"])
         self.excel_path_var.set(self.config.get("last_excel_path", ""))
-        self.printer_var.set(self.config.get("last_printer", "Impressora padrão"))
         self.layout_var.set(self.config.get("last_layout", "Layout Padrão"))
         if self.config.get("window_geometry"):
             self.root.geometry(self.config["window_geometry"])
@@ -143,7 +143,8 @@ class MainWindow:
         printer_panel.grid(row=2, column=0, sticky="ew", padx=(0, 8))
         printer_panel.grid_columnconfigure(0, weight=1)
         ttk.Label(printer_panel, text="Impressora").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Combobox(printer_panel, textvariable=self.printer_var, values=["Impressora padrão", "Impressora 2"], state="readonly").grid(row=1, column=0, sticky="ew")
+        self.printer_combobox = ttk.Combobox(printer_panel, textvariable=self.printer_var, state="readonly")
+        self.printer_combobox.grid(row=1, column=0, sticky="ew")
 
         layout_panel = ttk.Frame(top_controls)
         layout_panel.grid(row=2, column=1, sticky="ew")
@@ -268,6 +269,23 @@ class MainWindow:
         bottom_bar.grid_columnconfigure(0, weight=1)
         self.bottom_status_var = tk.StringVar(value="Produtos carregados: 0 | Visíveis: 0 | Selecionados: 0 | Etiquetas: 0 | Impressora: Impressora padrão | Layout: Layout Padrão | Status: Pronto")
         ttk.Label(bottom_bar, textvariable=self.bottom_status_var, style="Subtitle.TLabel").grid(row=0, column=0, sticky="w")
+
+        self._load_printer_list()
+
+    def _load_printer_list(self) -> None:
+        """Popula o combobox com as impressoras instaladas no Windows e seleciona a padrão."""
+        printers = PrinterService().list_printers()
+        self.printer_combobox["values"] = printers
+
+        if not printers:
+            self.printer_var.set("")
+            return
+
+        default_printer = PrinterService().get_default_printer()
+        if default_printer in printers:
+            self.printer_var.set(default_printer)
+        else:
+            self.printer_var.set(printers[0])
 
     def _build_batch_content(self):
         frame = ttk.LabelFrame(self.batch_frame, text="Configuração de impressão", padding=12)
@@ -468,14 +486,10 @@ class MainWindow:
 
         self.printer_service = PrinterService(self.printer_var.get())
         try:
-            image = self.label_renderer.render_image(test_product) if self.label_renderer is not None else None
-            if image is None:
-                raise RuntimeError("Renderer da etiqueta não inicializado.")
-
-            self.printer_service.print_image(image)
+            zpl = ZplBuilder().build(test_product)
+            self.printer_service.print_raw(zpl)
             self.status_var.set(
-                "Status: Teste de impressão enviado. Resolução: 300x220. Imagem: 300x220. "
-                "Tamanho físico: 30 mm x 15 mm. DPI: 300."
+                "Status: Teste de impressão enviado (ZPL). Etiqueta: 30 mm x 15 mm."
             )
             messagebox.showinfo(APP_TITLE, "Etiqueta de teste enviada para a impressora.")
         except Exception as exc:
@@ -500,16 +514,6 @@ class MainWindow:
         if isinstance(value, float):
             return f"{value:.2f}"
         return str(value)
-
-    def _build_label_image(self):
-        """Gera uma imagem Pillow a partir do estado atual da etiqueta."""
-        if self.label_renderer is None:
-            raise RuntimeError("Renderer da etiqueta não inicializado.")
-
-        if not hasattr(self, "_current_product"):
-            raise RuntimeError("Nenhum produto está carregado para impressão.")
-
-        return self.label_renderer.render_image(self._current_product)
 
     def _draw_preview_placeholder(self):
         """Desenha a pré-visualização vazia da etiqueta."""
@@ -734,6 +738,7 @@ class MainWindow:
         """Executa a impressão de cada produto em lote."""
         try:
             self.printer_service = PrinterService(self.printer_var.get())
+            zpl_builder = ZplBuilder()
             total = len(products)
             for index, product in enumerate(products, start=1):
                 if self.batch_cancelled:
@@ -744,11 +749,7 @@ class MainWindow:
                 self.root.after(0, self.batch_status_var.set, f"Imprimindo {index} de {total}...")
                 self.root.after(0, self.batch_current_var.set, f"Código: {product.get('codigo')}")
 
-                if self.label_renderer is None:
-                    raise RuntimeError("Renderer da etiqueta não inicializado.")
-
-                image = self.label_renderer.render_image(product)
-                self.printer_service.print_image(image)
+                self.printer_service.print_raw(zpl_builder.build(product))
                 time.sleep(0.05)
 
             if self.batch_cancelled:
@@ -785,11 +786,7 @@ class MainWindow:
 
             self.printer_service = PrinterService(self.printer_var.get())
             try:
-                if self.label_renderer is None:
-                    raise RuntimeError("Renderer da etiqueta não inicializado.")
-
-                image = self.label_renderer.render_image(self._current_product)
-                self.printer_service.print_image(image)
+                self.printer_service.print_raw(ZplBuilder().build(self._current_product))
                 self.status_var.set("Status: Etiqueta rápida enviada para impressão.")
             except Exception as exc:
                 self.status_var.set(f"Status: Falha ao imprimir a etiqueta rápida: {exc}")
