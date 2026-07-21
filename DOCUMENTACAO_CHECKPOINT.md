@@ -847,3 +847,113 @@ sobre `v1.1-smart-print`, seguindo o mesmo princípio que preservou
 `v1.0-print-engine`: preservar a arquitetura consolidada, evitar
 refatorações, e validar fisicamente somente quando uma funcionalidade
 estiver completa.
+
+---
+
+# Checkpoint v1.2-layout-final
+
+**Tag:** `v1.2-layout-final`
+**Status:** layout da etiqueta validado fisicamente na ELGIN L42PRO FULL e **oficialmente aprovado e congelado**.
+
+Este checkpoint registra o fechamento do ciclo de ajustes finos sobre a base
+`v1.1-smart-print`: refinamentos de codificação do código de barras,
+alinhamento visual e aproveitamento da largura útil da etiqueta para a
+descrição do produto — todos validados fisicamente, em rodadas incrementais
+de um único parâmetro por vez.
+
+## Impressão
+
+- Impressão RAW via ZPL, sem qualquer participação do driver GDI do Windows.
+- Remoção completa do caminho GDI (`print_image`, `_build_label_devmode`,
+  constantes de papel, imports `win32con`/`win32gui`/`win32ui`/`ImageWin`) —
+  consolidada desde `v1.0-print-engine`.
+- Impressão inteligente em até 3 colunas: lote agrupado em linhas via
+  `ZplBuilder.build_row()`, sem preenchimento fictício de colunas vazias —
+  consolidada em `v1.1-smart-print`.
+- Impressão por quantidade: cada produto imprime exatamente `qtd` etiquetas
+  (via expansão da lista antes do agrupamento em linhas), incluindo o caso
+  `qtd=0` (zero etiquetas, sem clamping para 1).
+- Compatibilidade validada fisicamente com a impressora **ELGIN L42PRO FULL**
+  em todos os cenários: 1, 2 e 3 colunas, agrupamento automático e
+  quantidades variadas.
+
+## Código de barras
+
+- Code128 com **Start Code C explícito** (`>;` no campo `^FD`), garantindo
+  compactação em Subset C (2 dígitos por símbolo) para os códigos numéricos
+  de 6 dígitos da Santa Rubi — corrigindo um Subset B implícito que estava
+  em uso desde a migração original (ZPL usa Subset B por padrão quando
+  nenhum start code é informado, conforme o Zebra ZPL II Programming Guide).
+- **Centralização matemática**: a largura real do símbolo Code128 é
+  calculada a partir da contagem exata de módulos da estrutura Code128
+  (start + dados em pares + checksum + stop) multiplicada pela largura do
+  módulo (`^BY`), e usada para centralizar o código de barras dentro da
+  coluna — sem medir/estimar visualmente.
+- **Ajuste óptico de +6 dots** (`BARCODE_VISUAL_OFFSET_X`): desloca o bloco
+  código de barras + código impresso abaixo dele horizontalmente, mantendo
+  o alinhamento relativo entre os dois, para melhorar o centro visual
+  percebido.
+- Leitura e alinhamento validados fisicamente na impressora real.
+
+## Interface
+
+- Memória da última impressora utilizada (`last_printer` em `config.json`,
+  via `ConfigManager` já existente), restaurada automaticamente na
+  abertura e salva a cada troca de impressora.
+- Memória da última planilha utilizada (`last_spreadsheet`), consolidada
+  como chave única (a antiga `last_excel_path` foi removida — zero
+  referências restantes no projeto).
+- Carregamento automático da última planilha na abertura do programa:
+  valida se o arquivo ainda existe, carrega produtos e atualiza tabela e
+  pré-visualização sem nenhuma ação do usuário; se o arquivo não existir
+  mais, limpa a chave do `config.json` e avisa o usuário, sem travar a
+  abertura.
+- Corrigido, como efeito colateral necessário dessa funcionalidade, um bug
+  pré-existente em `_load_products_into_table()` (`selection_set()` recebia
+  um `set()` do Python em vez de lista, travando com `TclError` sempre que
+  a seleção estava vazia — inclusive na seleção manual de planilha).
+
+## Layout da etiqueta
+
+- Layout validado fisicamente em múltiplas rodadas, uma variável por vez.
+- Código de barras: **aprovado**.
+- Código do produto: **aprovado**.
+- Categoria: **aprovada**.
+- Número: **aprovado**.
+- Preço: **aprovado**.
+- Descrição do produto: usando largura ampliada e dedicada de **198 dots**
+  (`DESCRIPTION_RIGHT_MARGIN = 4`, contra os 12 dots de margem direita
+  compartilhados por código/categoria — a descrição não divide linha com
+  nenhum outro campo, então pôde ganhar uma margem direita própria e menor,
+  sem risco de invadir os demais elementos; a margem esquerda, 38 dots,
+  é zona morta de hardware confirmada fisicamente e não foi reduzida).
+- `DESCRIPTION_MAX_CHARS = 26`: corte simples por quantidade de caracteres
+  (`descricao[:DESCRIPTION_MAX_CHARS]`), **sem qualquer heurística de
+  largura, cálculo em dots ou classificação de caracteres** — a impressora
+  decide o resultado real; o valor foi calibrado fisicamente subindo de 25
+  para 26 depois que a largura do campo foi ampliada.
+- Corte da descrição **sem reticências**: nenhum indicador é adicionado; o
+  texto que excede `DESCRIPTION_MAX_CHARS` é simplesmente interrompido.
+- Sem sobreposição de texto em nenhum campo.
+- Aproveitamento máximo da área útil disponível na etiqueta, respeitando as
+  zonas mortas de hardware já confirmadas.
+
+**Produto utilizado na validação física:**
+```
+BRINCO PINO FLOR CRAVEJADA
+```
+**Resultado:** descrição impressa integralmente (26 caracteres), sem corte,
+sem sobreposição — layout aprovado.
+
+## Layout Congelado
+
+Este layout foi aprovado após diversos testes físicos e passa a ser a
+**versão oficial do projeto**.
+
+Alterações futuras no layout somente deverão ocorrer em caso de:
+
+- correção de bugs comprovados;
+- mudança de hardware;
+- novo requisito de negócio.
+
+Pequenos ajustes estéticos não deverão mais ser realizados.

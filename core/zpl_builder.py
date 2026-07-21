@@ -10,6 +10,7 @@ resolução nativa (203 dpi = 240x120 dots para a etiqueta de 30x15mm).
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 LABEL_WIDTH_DOTS = 240
@@ -43,6 +44,17 @@ class ZplBuilder:
     BARCODE_HEIGHT = 30
     BARCODE_MODULE_WIDTH = 2
 
+    # Ajuste fino de alinhamento visual: desloca só o bloco código de barras +
+    # código impresso abaixo dele, mantendo o alinhamento relativo entre os
+    # dois. Não afeta os demais campos nem a largura calculada do símbolo.
+    BARCODE_VISUAL_OFFSET_X = 6
+
+    # Estrutura fixa de um símbolo Code128: cada caractere (start, dados,
+    # checksum) ocupa 11 módulos; o stop ocupa 13 (11 + barra de terminação
+    # de 2 módulos) — Zebra ZPL II Programming Guide, comando ^BC.
+    CODE128_SYMBOL_MODULES = 11
+    CODE128_STOP_MODULES = 13
+
     # Código: centralizado em linha própria, logo abaixo do barcode.
     CODE_ROW_Y = 44
     CODE_FONT_SIZE = 20
@@ -53,6 +65,15 @@ class ZplBuilder:
 
     DESCRIPTION_ROW_Y = 81
     DESCRIPTION_FONT_SIZE = 15
+    # Corte por quantidade de caracteres, sem cálculo de largura: a impressora
+    # decide a quebra/ajuste real. Ajustar este valor conforme teste físico.
+    DESCRIPTION_MAX_CHARS = 26
+    # Margem direita própria da descrição, menor que RIGHT_MARGIN (12):
+    # LEFT_MARGIN (38) é zona morta de hardware confirmada fisicamente e não
+    # é reduzida aqui; a direita nunca teve essa confirmação, e a descrição
+    # não compartilha linha com nenhum outro campo, então aproveita mais
+    # espaço sem risco de invadir código/categoria/número/preço.
+    DESCRIPTION_RIGHT_MARGIN = 4
 
     LAST_ROW_Y = 98
     NUMBER_FONT_SIZE = 13
@@ -70,6 +91,21 @@ class ZplBuilder:
     def _escape(self, text: str) -> str:
         """Remove caracteres reservados do ZPL (^ e ~) do conteúdo do campo."""
         return text.replace("^", "").replace("~", "")
+
+    def _barcode_width_dots(self, digit_count: int) -> int:
+        """Calcula a largura real (em dots) do símbolo Code128 gerado com
+        Start Code C explícito (>;): start(1 símbolo) + dados em pares —
+        Subset C, 2 dígitos por símbolo — + checksum(1 símbolo) + stop.
+        Não é uma estimativa: é a contagem exata de módulos da estrutura
+        Code128 para esta string, multiplicada pela largura do módulo (^BY)."""
+        data_symbols = math.ceil(digit_count / 2)
+        total_modules = (
+            self.CODE128_SYMBOL_MODULES  # start code C
+            + data_symbols * self.CODE128_SYMBOL_MODULES  # dados (Subset C)
+            + self.CODE128_SYMBOL_MODULES  # checksum (mod 103)
+            + self.CODE128_STOP_MODULES  # stop + barra de terminação
+        )
+        return total_modules * self.BARCODE_MODULE_WIDTH
 
     def _truncate(self, text: str, field_width_dots: int, font_size: int, ratio: float) -> str:
         """Trunca o texto para caber no campo, evitando que a impressora
@@ -96,6 +132,7 @@ class ZplBuilder:
 
         left = x_offset + self.LEFT_MARGIN
         content_width = LABEL_WIDTH_DOTS - self.LEFT_MARGIN - self.RIGHT_MARGIN
+        description_width = LABEL_WIDTH_DOTS - self.LEFT_MARGIN - self.DESCRIPTION_RIGHT_MARGIN
         price_width = content_width - self.NUMBER_COLUMN_WIDTH - 8
         price_x = left + self.NUMBER_COLUMN_WIDTH + 8
 
@@ -103,9 +140,7 @@ class ZplBuilder:
         categoria_linha = self._truncate(
             categoria, content_width, self.CATEGORY_FONT_SIZE, REGULAR_CHAR_WIDTH_RATIO
         )
-        descricao_linha = self._truncate(
-            descricao, content_width, self.DESCRIPTION_FONT_SIZE, REGULAR_CHAR_WIDTH_RATIO
-        )
+        descricao_linha = descricao[: self.DESCRIPTION_MAX_CHARS]
         numero_linha = self._truncate(
             numero, self.NUMBER_COLUMN_WIDTH, self.NUMBER_FONT_SIZE, REGULAR_CHAR_WIDTH_RATIO
         )
@@ -114,15 +149,21 @@ class ZplBuilder:
         lines: list[str] = []
 
         if codigo:
-            lines.append(f"^FO{left},{self.BARCODE_TOP}")
+            barcode_width = self._barcode_width_dots(len(codigo))
+            barcode_x = left + max(0, content_width - barcode_width) // 2 + self.BARCODE_VISUAL_OFFSET_X
+            lines.append(f"^FO{barcode_x},{self.BARCODE_TOP}")
             lines.append(f"^BY{self.BARCODE_MODULE_WIDTH}")
             lines.append(f"^BCN,{self.BARCODE_HEIGHT},N,N,N")
-            lines.append(f"^FD{codigo}^FS")
+            # Start Code C explícito (>;): os códigos da Santa Rubi são sempre
+            # numéricos com 6 dígitos, então o Subset C compacta 2 dígitos por
+            # símbolo em vez de 1 (Subset B, padrão do ^BC sem start code
+            # informado — Zebra ZPL II Programming Guide, comando ^BC).
+            lines.append(f"^FD>;{codigo}^FS")
 
         # Negrito: código do produto e preço (destaque). Sem negrito:
         # categoria, descrição e número.
         lines.append(
-            f"^FO{left},{self.CODE_ROW_Y}^FB{content_width},1,0,C,0"
+            f"^FO{left + self.BARCODE_VISUAL_OFFSET_X},{self.CODE_ROW_Y}^FB{content_width},1,0,C,0"
             f"^A{BOLD_FONT}N,{self.CODE_FONT_SIZE},{self.CODE_FONT_SIZE}^FD{codigo_linha}^FS"
         )
 
@@ -132,7 +173,7 @@ class ZplBuilder:
         )
 
         lines.append(
-            f"^FO{left},{self.DESCRIPTION_ROW_Y}^FB{content_width},1,0,C,0"
+            f"^FO{left},{self.DESCRIPTION_ROW_Y}^FB{description_width},1,0,C,0"
             f"^A{REGULAR_FONT}N,{self.DESCRIPTION_FONT_SIZE},{self.DESCRIPTION_FONT_SIZE}^FD{descricao_linha}^FS"
         )
 

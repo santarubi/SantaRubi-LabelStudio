@@ -66,7 +66,7 @@ class MainWindow:
 
         if self.config.get("last_mode") in ("batch", "quick"):
             self.mode_var.set(self.config["last_mode"])
-        self.excel_path_var.set(self.config.get("last_excel_path", ""))
+        self.excel_path_var.set(self.config.get("last_spreadsheet", ""))
         self.layout_var.set(self.config.get("last_layout", "Layout Padrão"))
         if self.config.get("window_geometry"):
             self.root.geometry(self.config["window_geometry"])
@@ -88,6 +88,7 @@ class MainWindow:
 
         self._setup_style()
         self._build_widgets()
+        self._load_last_spreadsheet()
 
     def _setup_style(self):
         style = ttk.Style(self.root)
@@ -432,7 +433,7 @@ class MainWindow:
             )
 
         visible_ids = {product["_id"] for product in self.filtered_products}
-        self.product_tree.selection_set(self.selected_product_ids.intersection(visible_ids))
+        self.product_tree.selection_set(list(self.selected_product_ids.intersection(visible_ids)))
         self._refresh_counts()
 
         if self.selected_product_ids:
@@ -602,21 +603,17 @@ class MainWindow:
     def _save_config(self) -> None:
         """Salva as preferências atuais do usuário no arquivo de configuração."""
         self.config["last_mode"] = self.mode_var.get()
-        self.config["last_excel_path"] = self.excel_path_var.get()
+        self.config["last_spreadsheet"] = self.excel_path_var.get()
         self.config["last_printer"] = self.printer_var.get()
         self.config["last_layout"] = self.layout_var.get()
         self.config["window_geometry"] = self.root.winfo_geometry()
         self.config_manager.save(self.config)
 
-    def _on_select_excel(self) -> None:
-        """Abre o diálogo para selecionar um arquivo Excel e carrega os produtos."""
-        file_path = filedialog.askopenfilename(
-            title="Selecione a planilha Excel",
-            filetypes=[("Arquivos Excel", "*.xlsx"), ("Todos os arquivos", "*")],
-        )
-        if not file_path:
-            return
+    def _load_spreadsheet(self, file_path: str) -> bool:
+        """Carrega a planilha informada no reader e atualiza tabela/preview.
 
+        Retorna True se a planilha foi carregada com sucesso, False se o
+        arquivo tinha erro (planilha inválida, colunas faltando etc.)."""
         self.excel_path_var.set(file_path)
         self.reader = ExcelReader(file_path)
 
@@ -627,14 +624,47 @@ class MainWindow:
             self.filtered_products = []
             self.selected_product_ids.clear()
             self._load_products_into_table()
-            return
+            return False
 
         self.all_products = self._get_product_list_from_reader()
         self.filtered_products = self._apply_search_filter(self.search_var.get())
         self.selected_product_ids.clear()
         self._load_products_into_table()
         self.status_var.set(f"Status: Planilha carregada com {len(self.all_products)} produtos.")
-        self._save_config()
+        return True
+
+    def _on_select_excel(self) -> None:
+        """Abre o diálogo para selecionar um arquivo Excel e carrega os produtos."""
+        file_path = filedialog.askopenfilename(
+            title="Selecione a planilha Excel",
+            filetypes=[("Arquivos Excel", "*.xlsx"), ("Todos os arquivos", "*")],
+        )
+        if not file_path:
+            return
+
+        if self._load_spreadsheet(file_path):
+            self._save_config()
+
+    def _load_last_spreadsheet(self) -> None:
+        """Carrega automaticamente a última planilha utilizada, se ela ainda existir.
+
+        Se o arquivo não existir mais, limpa last_spreadsheet do config.json
+        e avisa o usuário, deixando o restante da abertura seguir normalmente.
+        """
+        last_spreadsheet = self.config.get("last_spreadsheet")
+        if not last_spreadsheet:
+            return
+
+        if not Path(last_spreadsheet).exists():
+            self.config.pop("last_spreadsheet", None)
+            self.config_manager.save(self.config)
+            messagebox.showwarning(
+                APP_TITLE,
+                "A última planilha utilizada não foi encontrada. Selecione uma planilha para continuar.",
+            )
+            return
+
+        self._load_spreadsheet(last_spreadsheet)
 
     def _on_search_change(self) -> None:
         """Atualiza a lista exibida conforme o texto de pesquisa."""
