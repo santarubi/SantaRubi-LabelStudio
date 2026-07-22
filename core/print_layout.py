@@ -70,7 +70,11 @@ DESCRIPTION_MAX_CHARS = 26
 DESCRIPTION_RIGHT_MARGIN = 4
 
 LAST_ROW_Y = 98
-NUMBER_FONT_SIZE = 13
+# Aumentado de 13 para 16: números de anel (15/16/18/19) ficavam difíceis
+# de distinguir na etiqueta impressa. Continua menor que PRICE_FONT_SIZE
+# (18) e cabe com folga em NUMBER_COLUMN_WIDTH — não invade o preço nem
+# exige truncamento adicional para os números de 2 dígitos usados na loja.
+NUMBER_FONT_SIZE = 16
 NUMBER_COLUMN_WIDTH = 55
 PRICE_FONT_SIZE = 18
 
