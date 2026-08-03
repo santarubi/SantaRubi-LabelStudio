@@ -87,5 +87,45 @@ class ZplBuilderBuildAcceptsDictTests(unittest.TestCase):
             self.assertIn(line, zpl_from_row)
 
 
+class ZplBuilderDescriptionLayoutTests(unittest.TestCase):
+    def test_long_description_is_width_limited_before_single_line_field_block(self):
+        builder = ZplBuilder()
+        label = LabelData(
+            codigo="131848",
+            categoria="COLAR",
+            descricao="COLAR COURINO COUNTRY FERRADURA",
+            numero="",
+            preco=49.9,
+        )
+
+        description_field = next(
+            line for line in builder._build_fields(label)
+            if f",{builder.DESCRIPTION_ROW_Y}^FB" in line
+        )
+
+        self.assertIn("^FB198,1,0,C,0", description_field)
+        self.assertIn("^FDCOLAR COURINO COUNTRY FE^FS", description_field)
+        self.assertNotIn("COLAR COURINO COUNTRY FERR", description_field)
+        self.assertNotIn("...", description_field)
+
+    def test_description_that_already_fits_is_unchanged(self):
+        builder = ZplBuilder()
+        label = LabelData(
+            codigo="131848",
+            categoria="COLAR",
+            descricao="COLAR COURINO",
+            numero="",
+            preco=49.9,
+        )
+
+        description_field = next(
+            line for line in builder._build_fields(label)
+            if f",{builder.DESCRIPTION_ROW_Y}^FB" in line
+        )
+
+        self.assertIn("^FDCOLAR COURINO^FS", description_field)
+        self.assertNotIn("...", description_field)
+
+
 if __name__ == "__main__":
     unittest.main()

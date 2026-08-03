@@ -93,6 +93,78 @@ class CatalogServiceSearchTests(unittest.TestCase):
         self.assertEqual(len(service.apply_filters()), 4)
 
 
+class CatalogServiceMultiCodeSearchTests(unittest.TestCase):
+    """Reaproveita core.text_normalize.parse_multiple_codes — o mesmo
+    parser usado pela pesquisa Jueri (ui/product_search_dialog.py)."""
+
+    def test_single_code_behaves_exactly_like_before(self):
+        service, _, _ = build_service()
+        service.search("1001")
+        results = service.apply_filters()
+        self.assertEqual([p.codigo for p in results], ["1001"])
+
+    def test_comma_separated_codes_returns_all_matches(self):
+        service, _, _ = build_service()
+        service.search("1001,2001")
+        results = service.apply_filters()
+        self.assertEqual(sorted(p.codigo for p in results), ["1001", "2001"])
+
+    def test_semicolon_separated_codes(self):
+        service, _, _ = build_service()
+        service.search("1001;2001")
+        results = service.apply_filters()
+        self.assertEqual(sorted(p.codigo for p in results), ["1001", "2001"])
+
+    def test_newline_separated_codes(self):
+        service, _, _ = build_service()
+        service.search("1001\n2001")
+        results = service.apply_filters()
+        self.assertEqual(sorted(p.codigo for p in results), ["1001", "2001"])
+
+    def test_space_separated_codes(self):
+        service, _, _ = build_service()
+        service.search("1001 2001")
+        results = service.apply_filters()
+        self.assertEqual(sorted(p.codigo for p in results), ["1001", "2001"])
+
+    def test_three_codes_at_once(self):
+        service, _, _ = build_service()
+        service.search("1001,1002,2001")
+        results = service.apply_filters()
+        self.assertEqual(sorted(p.codigo for p in results), ["1001", "1002", "2001"])
+
+    def test_repeated_code_in_a_valid_list_does_not_duplicate_results(self):
+        service, _, _ = build_service()
+        service.search("1001,2001,1001")
+        results = service.apply_filters()
+        self.assertEqual(sorted(p.codigo for p in results), ["1001", "2001"])
+
+    def test_nonexistent_codes_are_ignored_keeping_the_rest(self):
+        service, _, _ = build_service()
+        service.search("1001,9999")
+        results = service.apply_filters()
+        self.assertEqual([p.codigo for p in results], ["1001"])
+
+    def test_all_nonexistent_codes_returns_empty(self):
+        service, _, _ = build_service()
+        service.search("8888,9999")
+        self.assertEqual(service.apply_filters(), [])
+
+    def test_multi_word_description_search_is_not_treated_as_code_list(self):
+        """Não deve alterar o comportamento da busca por descrição."""
+        service, _, _ = build_service()
+        service.search("de prata")
+        results = service.apply_filters()
+        self.assertEqual([p.codigo for p in results], ["1001"])
+
+    def test_multi_code_search_combines_with_supplier_and_category_filters(self):
+        service, _, _ = build_service()
+        service.filter_supplier("DIP-15")
+        service.search("1001,2001")  # 2001 e do outro fornecedor
+        results = service.apply_filters()
+        self.assertEqual([p.codigo for p in results], ["1001"])
+
+
 class CatalogServiceFilterTests(unittest.TestCase):
     def test_filter_supplier(self):
         service, source, _ = build_service()
@@ -160,6 +232,72 @@ class CatalogServiceSortTests(unittest.TestCase):
         # nao deve levantar excecao, so nao ordena
         results = service.apply_filters()
         self.assertEqual(len(results), 4)
+
+    def test_sort_by_numeracao_puts_non_numeric_empty_values_last(self):
+        """1001 (16) e 2002 (18) tem numeracao; 1002 e 2001 nao tem."""
+        service, _, _ = build_service()
+        service.sort_by("numeracao", reverse=False)
+        results = service.apply_filters()
+        codes = [p.codigo for p in results]
+        self.assertEqual(codes[:2], ["1001", "2002"])
+        self.assertEqual(set(codes[2:]), {"1002", "2001"})
+
+    def test_sort_by_numeracao_is_numeric_not_textual(self):
+        """Regressão do bug corrigido: numeracao "8" tem que vir antes de
+        "30" — a implementação anterior comparava como texto e colocava
+        "8" depois de "30"."""
+        source = FakeDataSource(
+            {
+                "DIP-15": [
+                    {"CODIGO": "1001", "DESCRICAO": "A", "PRECO": 1.0, "CATEGORIA": "Aneis", "NUMERO": "30"},
+                    {"CODIGO": "1002", "DESCRICAO": "B", "PRECO": 1.0, "CATEGORIA": "Aneis", "NUMERO": "8"},
+                    {"CODIGO": "1003", "DESCRICAO": "C", "PRECO": 1.0, "CATEGORIA": "Aneis", "NUMERO": "17"},
+                ],
+            }
+        )
+        settings = CatalogSettings(selected_sheets=["DIP-15"], column_map=COLUMN_MAP)
+        repository = CatalogRepository(source)
+        service = CatalogService(repository, settings)
+        service.reload()
+
+        service.sort_by("numeracao", reverse=False)
+        codes = [p.codigo for p in service.apply_filters()]
+
+        self.assertEqual(codes, ["1002", "1003", "1001"])  # 8, 17, 30
+
+    def test_sort_by_preco_empty_stays_last_regardless_of_direction(self):
+        source = FakeDataSource(
+            {
+                "DIP-15": [
+                    {"CODIGO": "1001", "DESCRICAO": "A", "PRECO": None, "CATEGORIA": "X", "NUMERO": ""},
+                    {"CODIGO": "1002", "DESCRICAO": "B", "PRECO": 10.0, "CATEGORIA": "X", "NUMERO": ""},
+                    {"CODIGO": "1003", "DESCRICAO": "C", "PRECO": 5.0, "CATEGORIA": "X", "NUMERO": ""},
+                ],
+            }
+        )
+        settings = CatalogSettings(selected_sheets=["DIP-15"], column_map=COLUMN_MAP)
+        repository = CatalogRepository(source)
+        service = CatalogService(repository, settings)
+        service.reload()
+
+        service.sort_by("preco", reverse=False)
+        ascending = [p.codigo for p in service.apply_filters()]
+        self.assertEqual(ascending, ["1003", "1002", "1001"])
+
+        service.sort_by("preco", reverse=True)
+        descending = [p.codigo for p in service.apply_filters()]
+        self.assertEqual(descending, ["1002", "1003", "1001"], "vazio nao pode virar primeiro ao inverter")
+
+    def test_sort_by_quantidade_is_numeric(self):
+        """Quantidade não é campo de CatalogProduct — vem de
+        attributes["default_quantity"] (coluna QTD), mas a coluna exibida
+        na tabela precisa ser ordenável mesmo assim."""
+        service, _, _ = build_service()
+        service.sort_by("quantidade", reverse=False)
+        results = service.apply_filters()
+        codes = [p.codigo for p in results]
+        # 2001 tem QTD=2, 1001 tem QTD=5 -> 2001 antes de 1001 ascendente
+        self.assertLess(codes.index("2001"), codes.index("1001"))
 
 
 class CatalogServiceStatisticsTests(unittest.TestCase):

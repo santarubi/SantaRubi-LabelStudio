@@ -1,18 +1,21 @@
 """Gerenciador simples de configurações para o Santa Rubi Label Studio.
 
-Este módulo usa um arquivo JSON em data/config.json para salvar as
-preferências do usuário sem precisar de banco de dados.
+Este módulo usa um arquivo JSON em %LOCALAPPDATA%/Santa Rubi Label Studio
+para salvar as preferências do usuário sem precisar de banco de dados.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+APP_DATA_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Santa Rubi Label Studio"
+
 
 class ConfigManager:
-    CONFIG_FILE = Path(__file__).resolve().parents[1] / "data" / "config.json"
+    CONFIG_FILE = APP_DATA_DIR / "config.json"
 
     def __init__(self) -> None:
         self.config_file = self.CONFIG_FILE

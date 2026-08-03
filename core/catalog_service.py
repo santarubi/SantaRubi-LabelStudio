@@ -19,27 +19,31 @@ from typing import Any, Callable
 from core.catalog_product import CatalogProduct
 from core.catalog_repository import CatalogRepository
 from core.catalog_settings import CatalogSettings
+from core.column_sort import SortDirection, numeric_or_text, sort_items
 from core.print_item import PrintItem
-from core.text_normalize import normalize_search_text
+from core.text_normalize import normalize_search_text, parse_multiple_codes
 
 SUPPLIER_ALL = "Todos"
 CATEGORY_ALL = "Todos"
 
 
-def _text_key(getter: Callable[[CatalogProduct], Any]) -> Callable[[CatalogProduct], str]:
-    return lambda product: normalize_search_text(getter(product))
-
-
 # Registro de critérios de ordenação disponíveis. Adicionar um novo
 # critério é só acrescentar uma entrada aqui — nenhum outro código precisa
-# mudar (nem CatalogService.sort_by(), nem a interface).
+# mudar (nem CatalogService.sort_by(), nem a interface). A ordenação em si
+# (número como número, texto sem acento/caixa, vazio sempre por último) é
+# feita por core.column_sort.sort_items — o mesmo componente que a
+# pesquisa Jueri usa, ver ui/product_search_dialog.py.
 SORT_KEY_FUNCTIONS: dict[str, Callable[[CatalogProduct], Any]] = {
-    "codigo": _text_key(lambda product: product.codigo),
-    "descricao": _text_key(lambda product: product.descricao),
-    "fornecedor": _text_key(lambda product: product.fornecedor),
-    "categoria": _text_key(lambda product: product.display_category),
-    "numeracao": _text_key(lambda product: product.numeracao),
-    "preco": lambda product: product.preco if product.preco is not None else float("-inf"),
+    "codigo": lambda product: numeric_or_text(product.codigo),
+    "descricao": lambda product: product.descricao,
+    "fornecedor": lambda product: product.fornecedor,
+    "categoria": lambda product: product.display_category,
+    "numeracao": lambda product: numeric_or_text(product.numeracao),
+    "preco": lambda product: product.preco,
+    # Quantidade não é um campo de CatalogProduct (ver docstring da
+    # classe) — é lida de attributes só para permitir ordenar a coluna
+    # exibida na tabela, sem virar um campo de primeira classe do produto.
+    "quantidade": lambda product: product.attributes.get("default_quantity"),
 }
 
 
@@ -110,13 +114,28 @@ class CatalogService:
         if self._category_filter and self._category_filter != CATEGORY_ALL:
             products = [product for product in products if product.display_category == self._category_filter]
 
-        query = normalize_search_text(self._search_text)
-        if query:
-            products = [product for product in products if query in product.search_blob]
+        # Mesmo parser que a pesquisa Jueri usa (core.text_normalize) — se
+        # o texto for uma lista de códigos, casa qualquer um deles (OR)
+        # contra o search_blob, com a mesma checagem de substring que a
+        # busca de um único termo já faz hoje. Sem risco de duplicar
+        # produto na lista final: cada produto é avaliado uma única vez.
+        codes = parse_multiple_codes(self._search_text) if self._search_text else None
+        if codes is not None:
+            normalized_codes = [normalize_search_text(code) for code in codes]
+            products = [
+                product
+                for product in products
+                if any(code in product.search_blob for code in normalized_codes)
+            ]
+        else:
+            query = normalize_search_text(self._search_text)
+            if query:
+                products = [product for product in products if query in product.search_blob]
 
         sort_key = SORT_KEY_FUNCTIONS.get(self._sort_field) if self._sort_field else None
         if sort_key is not None:
-            products = sorted(products, key=sort_key, reverse=self._sort_reverse)
+            direction = SortDirection.DESCENDING if self._sort_reverse else SortDirection.ASCENDING
+            products = sort_items(products, sort_key, direction)
 
         return list(products)
 

@@ -1,98 +1,95 @@
 """Interface principal do Santa Rubi Label Studio.
 
-Esta janela apresenta a estrutura visual completa da aplicação, sem
-implementação de lógica de negócio.
+Duas abas: "API Jueri" (pesquisa e integração com a API Jueri) e
+"Planilha Excel" (catálogo, fila de impressão e disparo da impressão —
+implementada em ui/catalog_tab.py). Esta janela apresenta a estrutura
+visual, sem lógica de negócio: pesquisa/ordenação/filtro vivem em
+core/, a fila de impressão em core/print_queue.py.
 """
 
-from pathlib import Path
-import threading
-import time
+from __future__ import annotations
+
 import tkinter as tk
-import unicodedata
-from tkinter import filedialog, messagebox, ttk
+from datetime import datetime
+from tkinter import messagebox, ttk
 from typing import Any
 
-from PIL import Image, ImageTk
-
+from app.api.auth import JueriCredentials
+from app.api.categories import CategoriesAPI
+from app.api.client import JueriClient
+from app.api.connection_test import JUERI_BASE_URL
+from app.api.date_filters import today_br, yesterday_br
+from app.api.product import Product
+from app.api.products import ProductsAPI
+from core.column_sort import ColumnSorter, numeric_or_text
 from core.config import ConfigManager
-from core.excel_reader import ExcelReader
-from core.label_data import LabelData
-from core.label_renderer import LabelRenderer
-from core.print_layout import BATCH_COLUMN_PITCH, BATCH_ROW_COLUMNS
-from core.printer import PrinterService
-from core.zpl_builder import ZplBuilder
+from core.queue_feedback import describe_queue_addition
+from core.table_state import apply_column_widths, apply_sorter_state, get_column_widths, get_sorter_state
 from ui.catalog_tab import CatalogTab
+from ui.product_search_dialog import ProductSearchDialog
+from ui.settings_dialog import SettingsDialog
+from ui.toast import Toast
+from ui.treeview_selection import enable_drag_selection
 
 APP_TITLE = "Santa Rubi Label Studio"
 WINDOW_SIZE = "1000x700"
 
-CATEGORY_ALL = "Todos"
+JUERI_RESULTS_MAX_HISTORY = 6
+
+JUERI_RESULTS_COLUMNS: dict[str, tuple[str, str, int, bool]] = {
+    # coluna: (texto do cabeçalho, alinhamento, largura, expande)
+    "codigo": ("Código", "w", 100, False),
+    "descricao": ("Descrição", "w", 320, True),
+    "categoria": ("Categoria", "w", 160, False),
+    "estoque": ("Estoque", "center", 90, False),
+    "cadastro": ("Cadastro", "center", 110, False),
+    "preco": ("Preço", "e", 100, False),
+}
 
 
 class MainWindow:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry(WINDOW_SIZE)
-        self.root.minsize(1000, 700)
-        self.root.configure(bg="#f4f6f8")
-
-        self.mode_var = tk.StringVar(value="batch")
-        self.excel_path_var = tk.StringVar()
-        self.printer_var = tk.StringVar(value="")
-        self.layout_var = tk.StringVar(value="Layout Padrão")
-        self.quantity_mode_var = tk.StringVar(value="all")
-        self.from_var = tk.StringVar()
-        self.to_var = tk.StringVar()
-        self.product_code_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="Status: Pronto.")
-        self.reader: ExcelReader | None = None
 
         self.config_manager = ConfigManager()
         self.config: dict[str, Any] = self.config_manager.load()
-        self.all_products: list[dict[str, Any]] = []
-        self.filtered_products: list[dict[str, Any]] = []
-        self.selected_product_ids: set[str] = set()
-        self.sort_column: str | None = None
-        self.sort_reverse = False
-        self.search_var = tk.StringVar()
-        self.category_var = tk.StringVar(value=CATEGORY_ALL)
 
-        self.loaded_products_count = 0
-        self.selected_products_count = 0
-        self.labels_to_print_count = 0
-        self.loaded_count_var = tk.StringVar(value="Produtos carregados: 0")
-        self.selected_count_var = tk.StringVar(value="Selecionados: 0")
-        self.filter_summary_var = tk.StringVar(value="Total: 0 | Exibindo: 0 | Selecionados: 0")
-        self.labels_count_var = tk.StringVar(value="Etiquetas: 0")
+        window_state = self.config.get("window_state", "zoomed")
+        self.root.geometry(self.config.get("window_geometry", WINDOW_SIZE))
+        self.root.minsize(1000, 700)
+        if window_state == "zoomed":
+            self.root.state("zoomed")
+        self.root.configure(bg="#f4f6f8")
 
-        if self.config.get("last_mode") in ("batch", "quick"):
-            self.mode_var.set(self.config["last_mode"])
-        self.excel_path_var.set(self.config.get("last_spreadsheet", ""))
-        self.layout_var.set(self.config.get("last_layout", "Layout Padrão"))
-        if self.config.get("window_geometry"):
-            self.root.geometry(self.config["window_geometry"])
+        # Cache em memória do CategoriesAPI — carregado uma única vez, no
+        # primeiro uso, e reaproveitado em todas as pesquisas Jueri seguintes.
+        self._jueri_categories_api: CategoriesAPI | None = None
+        self._jueri_dialog: ProductSearchDialog | None = None
+        self.jueri_last_search_results: list[Product] = []
+        self.jueri_search_history: list[dict[str, str]] = []
+        self.jueri_favorite_searches: list[dict[str, str]] = list(self.config.get("jueri_favorites", []))
+        self._jueri_sorter = ColumnSorter(
+            {
+                "codigo": lambda product: numeric_or_text(product.codigo_barras),
+                "descricao": lambda product: product.descricao,
+                "categoria": lambda product: self._resolve_jueri_category(product),
+                "estoque": lambda product: product.quantidade,
+                "cadastro": lambda product: product.data_criacao,
+                "preco": lambda product: product.preco_principal,
+            }
+        )
 
-        self.quick_code_var = tk.StringVar()
-        self.quick_code_display_var = tk.StringVar(value="—")
-        self.quick_category_var = tk.StringVar(value="—")
-        self.quick_description_var = tk.StringVar(value="—")
-        self.quick_number_var = tk.StringVar(value="—")
-        self.quick_price_var = tk.StringVar(value="—")
-
-        self.label_renderer: LabelRenderer | None = None
-        self.printer_service: PrinterService | None = None
-        self._drag_anchor_id: str | None = None
-        self._drag_active = False
-        self.batch_cancelled = False
-        self.batch_thread: threading.Thread | None = None
-        self.batch_progress_var = tk.DoubleVar(value=0.0)
-        self.batch_status_var = tk.StringVar(value="")
-        self._current_product: dict[str, Any] | None = None
+        self.jueri_status_var = tk.StringVar(value="Desabilitada")
+        self.jueri_client_var = tk.StringVar(value="—")
+        self.jueri_last_sync_var = tk.StringVar(value="Nunca")
+        self.jueri_result_count_var = tk.StringVar(value="0")
+        self.jueri_queue_count_var = tk.StringVar(value="0")
+        self.jueri_queue_labels_var = tk.StringVar(value="0")
+        self.jueri_queue_updated_var = tk.StringVar(value="—")
 
         self._setup_style()
         self._build_widgets()
-        self._load_last_spreadsheet()
 
     def _setup_style(self):
         style = ttk.Style(self.root)
@@ -121,1007 +118,510 @@ class MainWindow:
         )
 
     def _build_widgets(self):
+        app_header = ttk.Frame(self.root, style="Header.TFrame", padding=(16, 12))
+        app_header.pack(fill="x")
+        app_header.grid_columnconfigure(0, weight=1)
+        ttk.Label(app_header, text=APP_TITLE, style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            app_header, text="Configurações", style="App.TButton", command=self._open_settings
+        ).grid(row=0, column=1, sticky="e")
+
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
-        print_tab = ttk.Frame(self.notebook)
-        self.notebook.add(print_tab, text="Impressão")
+        self._build_jueri_tab()
+        self._build_catalog_tab()
 
-        main_container = ttk.Frame(print_tab, style="Content.TFrame", padding=16)
-        main_container.pack(fill="both", expand=True)
-        main_container.grid_columnconfigure(0, weight=1)
-        main_container.grid_rowconfigure(2, weight=1)
+        self.catalog_tab.apply_persisted_state(self.config.get("catalog_state", {}))
+        self._refresh_jueri_queue_summary()
 
-        header = ttk.Frame(main_container, style="Header.TFrame", padding=(0, 6))
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_columnconfigure(0, weight=1)
+        last_tab_index = self.config.get("last_tab_index", 0)
+        if last_tab_index in (0, 1):
+            self.notebook.select(last_tab_index)
 
-        title_label = ttk.Label(header, text=APP_TITLE, style="Title.TLabel")
-        title_label.grid(row=0, column=0, sticky="w")
+        self._bind_shortcuts()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        settings_button = ttk.Button(header, text="Configurações", style="App.TButton")
-        settings_button.grid(row=0, column=1, sticky="e")
+    def _bind_shortcuts(self) -> None:
+        """Melhoria 6 — atalhos globais. F3/Ctrl+P/Ctrl+L funcionam com
+        qualquer aba em foco; Ctrl+F muda para a Planilha Excel e foca a
+        pesquisa de lá (ESC/ENTER da janela de pesquisa Jueri vivem em
+        ui/product_search_dialog.py, que é uma janela independente)."""
+        self.root.bind_all("<F3>", lambda _event: self._on_search_jueri_product())
+        self.root.bind_all("<Control-f>", self._on_ctrl_f_shortcut)
+        self.root.bind_all("<Control-F>", self._on_ctrl_f_shortcut)
+        self.root.bind_all("<Control-p>", lambda _event: self.catalog_tab._on_print_queue())
+        self.root.bind_all("<Control-P>", lambda _event: self.catalog_tab._on_print_queue())
+        self.root.bind_all("<Control-l>", lambda _event: self.catalog_tab._on_clear_queue())
+        self.root.bind_all("<Control-L>", lambda _event: self.catalog_tab._on_clear_queue())
 
-        top_controls = ttk.Frame(main_container)
-        top_controls.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        top_controls.grid_columnconfigure(0, weight=1)
-        top_controls.grid_columnconfigure(1, weight=1)
-        top_controls.grid_columnconfigure(2, weight=0)
+    def _on_ctrl_f_shortcut(self, _event: Any = None) -> str:
+        self.notebook.select(self.catalog_tab_frame)
+        self.catalog_tab.focus_search_entry()
+        return "break"
 
-        ttk.Label(top_controls, text="Arquivo Excel").grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+    def _on_notebook_tab_changed(self, _event: Any = None) -> None:
+        """Evita informações desatualizadas ao voltar para a aba API
+        Jueri (ex.: credenciais alteradas em Configurações, ou fila
+        alterada manualmente na Planilha Excel)."""
+        if self.notebook.select() == str(self.jueri_tab_frame):
+            self._refresh_jueri_connection_status()
+            self._refresh_jueri_queue_summary()
 
-        excel_entry_row = ttk.Frame(top_controls)
-        excel_entry_row.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        excel_entry_row.grid_columnconfigure(0, weight=1)
-        ttk.Entry(excel_entry_row, textvariable=self.excel_path_var).grid(row=0, column=0, sticky="ew")
-        ttk.Button(excel_entry_row, text="Selecionar Planilha", style="App.TButton", command=self._on_select_excel).grid(row=0, column=1, padx=(8, 0))
+    def _on_close(self) -> None:
+        self._save_interface_state()
+        self.root.destroy()
 
-        printer_panel = ttk.Frame(top_controls)
-        printer_panel.grid(row=2, column=0, sticky="ew", padx=(0, 8))
-        printer_panel.grid_columnconfigure(0, weight=1)
-        ttk.Label(printer_panel, text="Impressora").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.printer_combobox = ttk.Combobox(printer_panel, textvariable=self.printer_var, state="readonly")
-        self.printer_combobox.grid(row=1, column=0, sticky="ew")
-        self.printer_combobox.bind("<<ComboboxSelected>>", self._on_printer_selected)
+    def _save_interface_state(self) -> None:
+        """Melhoria 5 — grava tudo de uma vez ao fechar o programa: aba
+        ativa, tamanho/posição da janela, largura de colunas e ordenação
+        das duas tabelas principais. Favoritos já são salvos no momento
+        em que são adicionados/removidos (ver _save_jueri_favorites)."""
+        self.config["last_tab_index"] = self.notebook.index(self.notebook.select())
 
-        layout_panel = ttk.Frame(top_controls)
-        layout_panel.grid(row=2, column=1, sticky="ew")
-        layout_panel.grid_columnconfigure(0, weight=1)
-        ttk.Label(layout_panel, text="Layout").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        ttk.Combobox(layout_panel, textvariable=self.layout_var, values=["Layout Padrão", "Layout 2"], state="readonly").grid(row=1, column=0, sticky="ew")
+        state = self.root.state()
+        self.config["window_state"] = state
+        if state == "normal":
+            self.config["window_geometry"] = self.root.geometry()
 
-        search_frame = ttk.Frame(top_controls)
-        search_frame.grid(row=3, column=0, columnspan=3, sticky="ew")
-        search_frame.grid_columnconfigure(0, weight=1)
-        search_frame.grid_columnconfigure(1, weight=0, minsize=220)
-        ttk.Label(search_frame, text="Pesquisar produto").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
-        self.search_entry.grid(row=1, column=0, sticky="ew", padx=(0, 12))
-        self.search_var.trace_add("write", lambda *_: self._on_search_change())
-        self.search_entry.bind("<Escape>", self._on_search_escape)
-        self.search_entry.bind("<Return>", self._on_search_enter)
+        self.config["jueri_results_column_widths"] = get_column_widths(self.jueri_results_tree)
+        sort_state = get_sorter_state(self._jueri_sorter)
+        if sort_state:
+            self.config["jueri_results_sort"] = sort_state
 
-        ttk.Label(search_frame, text="Categoria").grid(row=0, column=1, sticky="w", pady=(0, 4))
-        self.category_combobox = ttk.Combobox(
-            search_frame, textvariable=self.category_var, values=[CATEGORY_ALL], state="readonly"
+        self.config["catalog_state"] = self.catalog_tab.get_persisted_state()
+        self.config_manager.save(self.config)
+
+    # ------------------------------------------------------------------
+    # Aba "API Jueri" — painel de integração + resumo da fila + favoritos
+    # + histórico de pesquisas + resultado da última pesquisa. Nenhuma
+    # lógica de pesquisa/paginação é feita aqui: a janela
+    # ProductSearchDialog é quem consulta a ProductsAPI; esta aba só
+    # espelha o resultado já obtido por ela.
+    # ------------------------------------------------------------------
+
+    def _build_jueri_tab(self) -> None:
+        self.jueri_tab_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.jueri_tab_frame, text="API Jueri")
+
+        container = ttk.Frame(self.jueri_tab_frame, style="Content.TFrame", padding=16)
+        container.pack(fill="both", expand=True)
+        container.grid_columnconfigure(0, weight=1)
+        container.grid_rowconfigure(3, weight=1)
+
+        top_row = ttk.Frame(container)
+        top_row.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        top_row.grid_columnconfigure(0, weight=1)
+        top_row.grid_columnconfigure(1, weight=0, minsize=240)
+        self._build_jueri_integration_panel(top_row)
+        self._build_jueri_queue_summary_panel(top_row)
+
+        self._build_jueri_favorites_panel(container)
+        self._build_jueri_history_panel(container)
+        self._build_jueri_results_panel(container)
+
+        self._render_jueri_favorite_buttons()
+        self._render_jueri_history_buttons()
+        self._refresh_jueri_connection_status()
+        self._load_jueri_results_table()
+
+    def _build_stat_cell(
+        self, parent: ttk.Frame, row: int, column: int, label_text: str, value_var: tk.StringVar, columnspan: int = 1
+    ) -> None:
+        cell = ttk.Frame(parent)
+        cell.grid(row=row, column=column, columnspan=columnspan, sticky="w", padx=(0, 24), pady=(0, 4))
+        ttk.Label(cell, text=label_text, style="Subtitle.TLabel").pack(anchor="w")
+        ttk.Label(cell, textvariable=value_var, font=("Segoe UI", 11, "bold")).pack(anchor="w")
+
+    def _build_jueri_integration_panel(self, parent: ttk.Frame) -> None:
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=16)
+        panel.grid(row=0, column=0, sticky="nsew")
+        panel.grid_columnconfigure(4, weight=1)
+
+        ttk.Label(panel, text="Integração Jueri", font=("Segoe UI", 13, "bold")).grid(
+            row=0, column=0, columnspan=5, sticky="w", pady=(0, 12)
         )
-        self.category_combobox.grid(row=1, column=1, sticky="ew")
-        self.category_combobox.bind("<<ComboboxSelected>>", self._on_category_change)
 
-        content_frame = ttk.Frame(main_container)
-        content_frame.grid(row=2, column=0, sticky="nsew")
-        content_frame.grid_columnconfigure(0, weight=5)
-        content_frame.grid_columnconfigure(1, weight=0, minsize=380)
-        content_frame.grid_rowconfigure(0, weight=1)
+        self._build_stat_cell(panel, 1, 0, "Status da conexão", self.jueri_status_var)
+        self._build_stat_cell(panel, 1, 1, "Cliente", self.jueri_client_var)
+        self._build_stat_cell(panel, 1, 2, "Última sincronização", self.jueri_last_sync_var)
+        self._build_stat_cell(panel, 1, 3, "Produtos encontrados", self.jueri_result_count_var)
 
-        left_panel = ttk.Frame(content_frame, style="Card.TFrame", padding=12)
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        left_panel.grid_columnconfigure(0, weight=1)
-        left_panel.grid_rowconfigure(2, weight=1)
+        ttk.Button(
+            panel,
+            text="Pesquisar Produtos (F3)",
+            style="Primary.TButton",
+            command=lambda: self._on_search_jueri_product(),
+        ).grid(row=1, column=4, sticky="e", padx=(12, 0))
 
-        selection_buttons = ttk.Frame(left_panel)
-        selection_buttons.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        selection_buttons.grid_columnconfigure(0, weight=1)
-        selection_buttons.grid_columnconfigure(1, weight=1)
-        selection_buttons.grid_columnconfigure(2, weight=1)
-        ttk.Button(selection_buttons, text="Selecionar Todos", style="App.TButton", command=self._select_all).grid(row=0, column=0, sticky="ew")
-        ttk.Button(selection_buttons, text="Desmarcar Todos", style="App.TButton", command=self._deselect_all).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(selection_buttons, text="Inverter Seleção", style="App.TButton", command=self._invert_selection).grid(row=0, column=2, sticky="ew")
+    def _build_jueri_queue_summary_panel(self, parent: ttk.Frame) -> None:
+        panel = ttk.Frame(parent, style="Card.TFrame", padding=16)
+        panel.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_columnconfigure(1, weight=1)
 
-        ttk.Label(left_panel, textvariable=self.filter_summary_var, style="Subtitle.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(0, 6)
+        ttk.Label(panel, text="Fila de Impressão", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 10)
         )
+        self._build_stat_cell(panel, 1, 0, "Produtos", self.jueri_queue_count_var)
+        self._build_stat_cell(panel, 1, 1, "Etiquetas", self.jueri_queue_labels_var)
+        self._build_stat_cell(panel, 2, 0, "Última atualização", self.jueri_queue_updated_var, columnspan=2)
 
-        table_frame = ttk.Frame(left_panel)
-        table_frame.grid(row=2, column=0, sticky="nsew")
+    def _build_jueri_favorites_panel(self, container: ttk.Frame) -> None:
+        favorites_panel = ttk.LabelFrame(container, text="Pesquisas Favoritas", padding=12)
+        favorites_panel.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self.jueri_favorites_row = ttk.Frame(favorites_panel)
+        self.jueri_favorites_row.pack(fill="x", anchor="w")
+
+    def _build_jueri_history_panel(self, container: ttk.Frame) -> None:
+        history_panel = ttk.LabelFrame(container, text="Pesquisas Recentes", padding=12)
+        history_panel.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        self.jueri_history_row = ttk.Frame(history_panel)
+        self.jueri_history_row.pack(fill="x", anchor="w")
+
+    def _build_jueri_results_panel(self, container: ttk.Frame) -> None:
+        results_panel = ttk.LabelFrame(container, text="Resultado da Última Pesquisa", padding=12)
+        results_panel.grid(row=3, column=0, sticky="nsew")
+        results_panel.grid_columnconfigure(0, weight=1)
+        results_panel.grid_rowconfigure(0, weight=1)
+
+        table_frame = ttk.Frame(results_panel)
+        table_frame.grid(row=0, column=0, sticky="nsew")
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
 
-        self.product_tree = ttk.Treeview(
-            table_frame,
-            columns=("selecionar", "codigo", "descricao", "categoria", "qtd", "preco", "numero"),
-            show="headings",
-            selectmode="extended",
+        columns = tuple(JUERI_RESULTS_COLUMNS.keys())
+        self.jueri_results_tree = ttk.Treeview(
+            table_frame, columns=columns, show="headings", selectmode="extended"
         )
-        self.product_tree.grid(row=0, column=0, sticky="nsew")
+        self.jueri_results_tree.grid(row=0, column=0, sticky="nsew")
 
-        vertical_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.product_tree.yview)
-        self.product_tree.configure(yscrollcommand=vertical_scroll.set)
-        vertical_scroll.grid(row=0, column=1, sticky="ns")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.jueri_results_tree.yview)
+        self.jueri_results_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
 
-        self.product_tree.heading("selecionar", text="Seleção", command=lambda: self._sort_table("selecionar"), anchor="center")
-        self.product_tree.heading("codigo", text="Código", command=lambda: self._sort_table("codigo"), anchor="center")
-        self.product_tree.heading("descricao", text="Descrição", command=lambda: self._sort_table("descricao"), anchor="w")
-        self.product_tree.heading("categoria", text="Categoria", command=lambda: self._sort_table("categoria"), anchor="w")
-        self.product_tree.heading("qtd", text="Quantidade", command=lambda: self._sort_table("qtd"), anchor="center")
-        self.product_tree.heading("preco", text="Preço", command=lambda: self._sort_table("preco"), anchor="center")
-        self.product_tree.heading("numero", text="Número", command=lambda: self._sort_table("numero"), anchor="center")
+        for column, (text, anchor, width, stretch) in JUERI_RESULTS_COLUMNS.items():
+            self.jueri_results_tree.heading(
+                column, text=text, command=lambda c=column: self._on_sort_jueri_column(c), anchor=anchor
+            )
+            self.jueri_results_tree.column(column, anchor=anchor, width=width, minwidth=70, stretch=stretch)
 
-        self.product_tree.column("selecionar", anchor="center", width=50, minwidth=50, stretch=False)
-        self.product_tree.column("codigo", anchor="center", width=90, minwidth=90, stretch=False)
-        self.product_tree.column("descricao", anchor="w", width=240, minwidth=120, stretch=True)
-        self.product_tree.column("categoria", anchor="w", width=180, minwidth=120, stretch=False)
-        self.product_tree.column("qtd", anchor="center", width=80, minwidth=80, stretch=False)
-        self.product_tree.column("preco", anchor="e", width=90, minwidth=90, stretch=False)
-        self.product_tree.column("numero", anchor="center", width=70, minwidth=70, stretch=False)
+        apply_column_widths(self.jueri_results_tree, self.config.get("jueri_results_column_widths", {}))
+        apply_sorter_state(self._jueri_sorter, self.config.get("jueri_results_sort"))
 
+        enable_drag_selection(self.jueri_results_tree)
+        self.jueri_results_tree.bind("<Control-a>", self._on_jueri_select_all_shortcut)
+        self.jueri_results_tree.bind("<Control-A>", self._on_jueri_select_all_shortcut)
 
-        self.product_tree.bind("<<TreeviewSelect>>", self._on_table_select)
-        self.product_tree.bind("<Double-1>", self._on_table_double_click)
-        self.product_tree.bind("<ButtonPress-1>", self._on_table_press)
-        self.product_tree.bind("<B1-Motion>", self._on_table_drag)
-        self.product_tree.bind("<ButtonRelease-1>", self._on_table_release)
-        self.product_tree.bind("<Control-a>", self._on_table_select_all_shortcut)
-        self.product_tree.bind("<Control-A>", self._on_table_select_all_shortcut)
+        footer = ttk.Frame(results_panel)
+        footer.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        footer.grid_columnconfigure(0, weight=1)
+        self.jueri_toast_label = tk.Label(footer, text="", font=("Segoe UI", 9, "bold"), anchor="w", justify="left")
+        self.jueri_toast_label.grid(row=0, column=0, sticky="w")
+        self.jueri_toast = Toast(self.jueri_toast_label)
 
-        right_panel = ttk.Frame(content_frame, style="Card.TFrame", padding=12)
-        right_panel.grid(row=0, column=1, sticky="nsew", pady=(0, 8))
-        right_panel.grid_columnconfigure(0, weight=1)
-        right_panel.grid_rowconfigure(0, weight=0)
-        right_panel.grid_rowconfigure(1, weight=0)
-        right_panel.grid_rowconfigure(2, weight=1)
-        right_panel.grid_rowconfigure(3, weight=0)
-        right_panel.grid_rowconfigure(4, weight=0)
+        buttons_row = ttk.Frame(footer)
+        buttons_row.grid(row=0, column=1, sticky="e")
+        ttk.Button(
+            buttons_row, text="Nova Pesquisa", style="App.TButton", command=lambda: self._on_search_jueri_product()
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            buttons_row,
+            text="Adicionar Selecionados à Fila",
+            style="Primary.TButton",
+            command=self._on_add_jueri_selection_to_queue,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            buttons_row, text="Limpar Resultado", style="App.TButton", command=self._on_clear_jueri_results
+        ).pack(side="left")
 
-        self.batch_frame = ttk.Frame(right_panel)
-        self.batch_frame.grid(row=0, column=0, sticky="ew")
-        self.quick_frame = ttk.Frame(right_panel)
-        self.quick_frame.grid(row=0, column=0, sticky="ew")
-        self._build_batch_content()
-        self._build_quick_content()
-        self._show_active_mode()
+    def _build_catalog_tab(self) -> None:
+        self.catalog_tab_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.catalog_tab_frame, text="Planilha Excel")
+        self.catalog_tab = CatalogTab(self.catalog_tab_frame, self.config_manager, self.config)
 
-        preview_label = ttk.Label(right_panel, text="Pré-visualização da etiqueta", style="Subtitle.TLabel")
-        preview_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
+    def _open_settings(self) -> None:
+        dialog = SettingsDialog(self.root, self.config_manager, self.config)
+        self.root.wait_window(dialog)
+        self._refresh_jueri_connection_status()
 
-        preview_frame = ttk.Frame(right_panel, style="Card.TFrame")
-        preview_frame.grid(row=2, column=0, sticky="nsew", pady=(8, 8))
-        preview_frame.grid_columnconfigure(0, weight=1)
-        preview_frame.grid_rowconfigure(0, weight=1)
-        preview_frame.configure(height=340)
-
-        self.preview_canvas = tk.Canvas(preview_frame, bg="#ffffff", highlightthickness=1, highlightbackground="#dbe2ea")
-        self.preview_canvas.grid(row=0, column=0, sticky="nsew", padx=(6, 6), pady=(6, 6))
-        self.preview_canvas.bind("<Configure>", self._on_preview_resize)
-        self.label_renderer = LabelRenderer(self.preview_canvas)
-        self._preview_image_ref = None
-        self._draw_preview_placeholder()
-
-        progress_frame = ttk.Frame(right_panel)
-        progress_frame.grid(row=3, column=0, sticky="ew", pady=(0, 8))
-        progress_frame.grid_columnconfigure(0, weight=1)
-        ttk.Progressbar(progress_frame, style="Slim.Horizontal.TProgressbar", variable=self.batch_progress_var, maximum=100).grid(row=0, column=0, sticky="ew")
-
-        preview_button_frame = ttk.Frame(right_panel)
-        preview_button_frame.grid(row=4, column=0, sticky="ew")
-        preview_button_frame.grid_columnconfigure(0, weight=1)
-        preview_button_frame.grid_columnconfigure(1, weight=1)
-        preview_button_frame.grid_columnconfigure(2, weight=1)
-        preview_button_frame.grid_columnconfigure(3, weight=1)
-        ttk.Button(preview_button_frame, text="Visualizar", style="App.TButton", command=self._draw_preview_placeholder).grid(row=0, column=0, sticky="ew")
-        ttk.Button(preview_button_frame, text="Imprimir", style="Primary.TButton", command=self._on_print).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(preview_button_frame, text="Teste de Impressão", style="Primary.TButton", command=self._on_test_print).grid(row=0, column=2, sticky="ew", padx=(0, 8))
-        ttk.Button(preview_button_frame, text="Imprimir Selecionados", style="Primary.TButton", command=self._on_print_selected).grid(row=0, column=3, sticky="ew")
-
-        bottom_bar = ttk.Frame(main_container, style="Header.TFrame", padding=(0, 10))
-        bottom_bar.grid(row=3, column=0, sticky="ew")
-        bottom_bar.grid_columnconfigure(0, weight=1)
-        self.bottom_status_var = tk.StringVar(value="Produtos carregados: 0 | Visíveis: 0 | Selecionados: 0 | Etiquetas: 0 | Impressora: Impressora padrão | Layout: Layout Padrão | Status: Pronto")
-        ttk.Label(bottom_bar, textvariable=self.bottom_status_var, style="Subtitle.TLabel").grid(row=0, column=0, sticky="w")
-
-        self._load_printer_list()
-
-        self.root.bind_all("<Control-f>", self._on_ctrl_f_shortcut)
-        self.root.bind_all("<Control-F>", self._on_ctrl_f_shortcut)
-
-        catalog_tab_frame = ttk.Frame(self.notebook)
-        self.notebook.add(catalog_tab_frame, text="Catálogo Integrado")
-        self.catalog_tab = CatalogTab(catalog_tab_frame, self.config_manager, self.config)
-
-    def _load_printer_list(self) -> None:
-        """Popula o combobox com as impressoras instaladas e seleciona a última utilizada."""
-        printers = PrinterService().list_printers()
-        self.printer_combobox["values"] = printers
-
-        if not printers:
-            self.printer_var.set("")
-            return
-
-        last_printer = self.config.get("last_printer")
-        if last_printer in printers:
-            self.printer_var.set(last_printer)
-            return
-
-        default_printer = PrinterService().get_default_printer()
-        if default_printer in printers:
-            self.printer_var.set(default_printer)
+    def _refresh_jueri_connection_status(self) -> None:
+        credentials = JueriCredentials.from_config(self.config)
+        if not credentials.enabled:
+            self.jueri_status_var.set("Desabilitada")
+        elif not credentials.cliente_sistema or not credentials.token:
+            self.jueri_status_var.set("Credenciais incompletas")
         else:
-            self.printer_var.set(printers[0])
+            self.jueri_status_var.set("Habilitada")
+        self.jueri_client_var.set(credentials.cliente_sistema or "—")
 
-        if last_printer:
-            self.config["last_printer"] = self.printer_var.get()
-            self.config_manager.save(self.config)
+    def _refresh_jueri_queue_summary(self) -> None:
+        """Melhoria 3 — resumo da fila (nunca a fila completa). Chamado
+        sempre que produtos são adicionados pela API Jueri, e também ao
+        voltar para esta aba, para nunca mostrar números desatualizados."""
+        self.jueri_queue_count_var.set(str(self.catalog_tab.print_queue.count()))
+        self.jueri_queue_labels_var.set(str(self.catalog_tab.print_queue.total_labels()))
+        self.jueri_queue_updated_var.set(datetime.now().strftime("%H:%M"))
 
-    def _on_printer_selected(self, _: Any = None) -> None:
-        """Salva a impressora escolhida como a última utilizada."""
-        self.config["last_printer"] = self.printer_var.get()
+    def _on_search_jueri_product(self, prefill: dict[str, str] | None = None) -> None:
+        """Abre a pesquisa de produtos Jueri — produtos escolhidos vão
+        para a mesma fila de impressão da aba Planilha Excel. `prefill`
+        (usado pelos botões de "Pesquisas Recentes"/"Pesquisas Favoritas")
+        reabre a janela já com o mesmo texto/intervalo de datas de uma
+        pesquisa anterior. Se a janela já estiver aberta, só traz ela para
+        frente em vez de abrir uma segunda (F3 pode ser pressionado com o
+        diálogo em foco)."""
+        if self._jueri_dialog is not None and self._jueri_dialog.winfo_exists():
+            self._jueri_dialog.lift()
+            self._jueri_dialog.focus_force()
+            return
+
+        credentials = JueriCredentials.from_config(self.config)
+        if not credentials.enabled:
+            messagebox.showwarning(
+                APP_TITLE,
+                "A integração com o Jueri está desabilitada. Habilite em "
+                "Configurações antes de pesquisar.",
+            )
+            return
+
+        client = JueriClient(JUERI_BASE_URL, credentials)
+        products_api = ProductsAPI(client)
+        if self._jueri_categories_api is None:
+            self._jueri_categories_api = CategoriesAPI(client)
+
+        prefill = prefill or {}
+        self._jueri_dialog = ProductSearchDialog(
+            self.root,
+            products_api,
+            on_add_selected=self._on_jueri_products_selected,
+            initial_query=prefill.get("query", ""),
+            initial_data_inicial=prefill.get("data_inicial", ""),
+            initial_data_final=prefill.get("data_final", ""),
+        )
+
+    def _on_jueri_products_selected(self, products: list[Product]) -> None:
+        """Produtos escolhidos na pesquisa Jueri entram na MESMA fila de
+        impressão (PrintQueue) que a aba Planilha Excel usa — nenhuma
+        lógica de fila é implementada aqui: só converte cada produto
+        (Product.to_catalog_product()) e delega para
+        CatalogTab.add_product_to_queue(). Também espelha o resultado
+        completo da última pesquisa (não só os selecionados) na tabela
+        desta aba, para que ela funcione como histórico temporário.
+
+        Não muda mais de aba automaticamente (Melhoria 1) — o usuário
+        continua na API Jueri e só vê a fila quando clicar manualmente em
+        Planilha Excel."""
+        added = 0
+        updated = 0
+        for product in products:
+            catalog_product = product.to_catalog_product(self._jueri_categories_api)
+            if self.catalog_tab.print_queue.contains(catalog_product):
+                updated += 1
+            else:
+                added += 1
+            self.catalog_tab.add_product_to_queue(catalog_product)
+
+        if self._jueri_dialog is not None:
+            self._record_jueri_search_history(self._jueri_dialog)
+            self.jueri_last_search_results = list(self._jueri_dialog.results)
+            self._load_jueri_results_table()
+            self._update_jueri_sync_status()
+
+        self._refresh_jueri_queue_summary()
+        self.jueri_toast.show(describe_queue_addition(added, updated))
+
+    def _record_jueri_search_history(self, dialog: ProductSearchDialog) -> None:
+        entry = {
+            "label": self._describe_jueri_search(dialog),
+            "query": dialog.search_var.get().strip(),
+            "data_inicial": dialog.data_inicial_var.get().strip(),
+            "data_final": dialog.data_final_var.get().strip(),
+        }
+        self.jueri_search_history = [
+            item for item in self.jueri_search_history if item["label"] != entry["label"]
+        ]
+        self.jueri_search_history.insert(0, entry)
+        self.jueri_search_history = self.jueri_search_history[:JUERI_RESULTS_MAX_HISTORY]
+        self._render_jueri_history_buttons()
+
+    @staticmethod
+    def _describe_jueri_search(dialog: ProductSearchDialog) -> str:
+        query = dialog.search_var.get().strip()
+        if query:
+            return query
+
+        inicio = dialog.data_inicial_var.get().strip()
+        fim = dialog.data_final_var.get().strip()
+        if inicio and fim:
+            if inicio == fim:
+                if inicio == today_br():
+                    return "Hoje"
+                if inicio == yesterday_br():
+                    return "Ontem"
+                return inicio
+            return f"{inicio} a {fim}"
+
+        return "Todos os produtos"
+
+    def _render_jueri_history_buttons(self) -> None:
+        for child in self.jueri_history_row.winfo_children():
+            child.destroy()
+
+        if not self.jueri_search_history:
+            ttk.Label(
+                self.jueri_history_row, text="Nenhuma pesquisa realizada ainda.", style="Subtitle.TLabel"
+            ).pack(side="left")
+            return
+
+        for entry in self.jueri_search_history:
+            chip = ttk.Frame(self.jueri_history_row)
+            chip.pack(side="left", padx=(0, 8))
+            ttk.Button(
+                chip,
+                text=entry["label"],
+                style="App.TButton",
+                command=lambda entry=entry: self._on_search_jueri_product(prefill=entry),
+            ).pack(side="left")
+            ttk.Button(
+                chip,
+                text="☆",
+                width=2,
+                command=lambda entry=entry: self._on_add_jueri_favorite(entry),
+            ).pack(side="left", padx=(2, 0))
+
+    # ------------------------------------------------------------------
+    # Melhoria 4 — Favoritos: mesmo formato de entrada do histórico
+    # (label/query/data_inicial/data_final), persistidos em config.json.
+    # ------------------------------------------------------------------
+
+    def _render_jueri_favorite_buttons(self) -> None:
+        for child in self.jueri_favorites_row.winfo_children():
+            child.destroy()
+
+        if not self.jueri_favorite_searches:
+            ttk.Label(
+                self.jueri_favorites_row, text="Nenhuma pesquisa favoritada ainda.", style="Subtitle.TLabel"
+            ).pack(side="left")
+            return
+
+        for entry in self.jueri_favorite_searches:
+            chip = ttk.Frame(self.jueri_favorites_row)
+            chip.pack(side="left", padx=(0, 8))
+            ttk.Button(
+                chip,
+                text=f"★ {entry['label']}",
+                style="App.TButton",
+                command=lambda entry=entry: self._on_search_jueri_product(prefill=entry),
+            ).pack(side="left")
+            ttk.Button(
+                chip,
+                text="×",
+                width=2,
+                command=lambda entry=entry: self._on_remove_jueri_favorite(entry),
+            ).pack(side="left", padx=(2, 0))
+
+    def _on_add_jueri_favorite(self, entry: dict[str, str]) -> None:
+        if any(favorite["label"] == entry["label"] for favorite in self.jueri_favorite_searches):
+            return
+        self.jueri_favorite_searches.append(dict(entry))
+        self._save_jueri_favorites()
+        self._render_jueri_favorite_buttons()
+
+    def _on_remove_jueri_favorite(self, entry: dict[str, str]) -> None:
+        self.jueri_favorite_searches = [
+            favorite for favorite in self.jueri_favorite_searches if favorite["label"] != entry["label"]
+        ]
+        self._save_jueri_favorites()
+        self._render_jueri_favorite_buttons()
+
+    def _save_jueri_favorites(self) -> None:
+        self.config["jueri_favorites"] = list(self.jueri_favorite_searches)
         self.config_manager.save(self.config)
 
-    def _build_batch_content(self):
-        frame = ttk.LabelFrame(self.batch_frame, text="Configuração de impressão", padding=12)
-        frame.pack(fill="x", expand=True)
-
-        quantity_frame = ttk.LabelFrame(frame, text="Quantidade", padding=(12, 10))
-        quantity_frame.pack(fill="x", pady=(0, 10))
-
-        ttk.Radiobutton(quantity_frame, text="Todas", variable=self.quantity_mode_var, value="all").grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(quantity_frame, text="Intervalo", variable=self.quantity_mode_var, value="range").grid(row=1, column=0, sticky="w", pady=(6, 8))
-
-        range_row = ttk.Frame(quantity_frame)
-        range_row.grid(row=2, column=0, sticky="ew")
-        range_row.grid_columnconfigure(1, weight=1)
-        ttk.Label(range_row, text="De").grid(row=0, column=0, sticky="w")
-        ttk.Entry(range_row, textvariable=self.from_var, width=10).grid(row=0, column=1, sticky="w", padx=(6, 12))
-        ttk.Label(range_row, text="Até").grid(row=0, column=2, sticky="w")
-        ttk.Entry(range_row, textvariable=self.to_var, width=10).grid(row=0, column=3, sticky="w", padx=(6, 0))
-
-        progress_frame = ttk.LabelFrame(frame, text="Progresso", padding=(12, 10))
-        progress_frame.pack(fill="x")
-        ttk.Progressbar(progress_frame, style="Slim.Horizontal.TProgressbar", variable=self.batch_progress_var, maximum=100).pack(fill="x")
-        ttk.Label(progress_frame, textvariable=self.batch_status_var).pack(anchor="w", pady=(6, 0))
-
-        self.batch_current_var = tk.StringVar(value="")
-        ttk.Label(progress_frame, textvariable=self.batch_current_var, foreground="#334155").pack(anchor="w", pady=(4, 0))
-
-    def _build_quick_content(self):
-        form_frame = ttk.LabelFrame(self.quick_frame, text="Consulta rápida", padding=16)
-        form_frame.pack(fill="both", expand=True)
-
-        ttk.Label(form_frame, text="Código").pack(anchor="w")
-        quick_entry = ttk.Entry(form_frame, textvariable=self.quick_code_var, width=50)
-        quick_entry.pack(fill="x", pady=(6, 16))
-        quick_entry.bind("<Return>", self._on_quick_search)
-
-        details_frame = ttk.LabelFrame(form_frame, text="Detalhes do produto", padding=12)
-        details_frame.pack(fill="both", expand=True)
-
-        rows = [
-            ("Código", self.quick_code_display_var),
-            ("Categoria", self.quick_category_var),
-            ("Descrição", self.quick_description_var),
-            ("Número", self.quick_number_var),
-            ("Preço", self.quick_price_var),
-        ]
-
-        for label_text, value_var in rows:
-            row = ttk.Frame(details_frame)
-            row.pack(fill="x", pady=4)
-            ttk.Label(row, text=label_text, width=16).pack(side="left")
-            ttk.Label(row, textvariable=value_var, style="DetailValue.TLabel").pack(side="left")
-
-    def _show_active_mode(self):
-        if self.mode_var.get() == "quick":
-            self.batch_frame.grid_remove()
-            self.quick_frame.grid()
-        else:
-            self.quick_frame.grid_remove()
-            self.batch_frame.grid()
-
-    def _parse_int(self, value: str) -> int | None:
-        """Converte valores para inteiro, retornando None se não forem válidos."""
-        try:
-            return int(value)
-        except (TypeError, ValueError):
+    def _resolve_jueri_category(self, product: Product) -> str | None:
+        if self._jueri_categories_api is None:
             return None
+        return self._jueri_categories_api.nome_categoria(product.fk_categoria_id)
 
-    def _get_product_list_from_reader(self) -> list[dict[str, Any]]:
-        """Constrói uma lista de produtos normalizada a partir do reader carregado."""
-        if self.reader is None or self.reader.error_message:
-            return []
+    def _update_jueri_sync_status(self) -> None:
+        self.jueri_last_sync_var.set(datetime.now().strftime("%d/%m/%Y %H:%M"))
 
-        products: list[dict[str, Any]] = []
-        for index, row in enumerate(self.reader.rows):
-            codigo = row.get("CODIGO")
-            categoria = row.get("CATEGORIA")
-            descricao = row.get("DESCRICAO")
-            numero = row.get("NUMERO")
-            products.append(
-                {
-                    "_id": f"product_{index}",
-                    "codigo": codigo,
-                    "categoria": categoria,
-                    "descricao": descricao,
-                    "numero": numero,
-                    "preco": row.get("PRECO"),
-                    "qtd": row.get("QTD"),
-                    "_search_blob": self._build_search_blob(codigo, categoria, descricao, numero),
-                }
-            )
-        return products
-
-    def _normalize_search_text(self, value: Any) -> str:
-        """Remove acentuação e caixa para comparação de pesquisa (ex.: 'Café' == 'cafe')."""
-        text = "" if value is None else str(value)
-        text = unicodedata.normalize("NFKD", text)
-        text = "".join(char for char in text if not unicodedata.combining(char))
-        return text.strip().lower()
-
-    def _build_search_blob(self, *values: Any) -> str:
-        """Concatena os campos pesquisáveis já normalizados.
-
-        Pré-computado uma única vez por produto (na carga da planilha), para
-        que cada tecla digitada na pesquisa só faça comparações de substring
-        contra texto já normalizado — mantém a busca instantânea mesmo com
-        milhares de produtos carregados.
-        """
-        return " ".join(self._normalize_search_text(value) for value in values)
-
-    def _apply_search_filter(
-        self, query: str, products: list[dict[str, Any]] | None = None
-    ) -> list[dict[str, Any]]:
-        """Filtra os produtos informados com base no texto de pesquisa
-        (código, categoria, descrição e número), sem diferenciar
-        maiúsculas/minúsculas nem acentuação. Filtra `self.all_products`
-        quando nenhuma lista é informada."""
-        if products is None:
-            products = self.all_products
-
-        normalized_query = self._normalize_search_text(query)
-        if not normalized_query:
-            return list(products)
-
-        return [
-            product
-            for product in products
-            if normalized_query in product.get("_search_blob", "")
-        ]
-
-    def _get_category_options(self) -> list[str]:
-        """Retorna as categorias únicas da planilha carregada, ordenadas
-        alfabeticamente, com "Todos" sempre como primeira opção."""
-        categories = {
-            str(product["categoria"]).strip()
-            for product in self.all_products
-            if product.get("categoria") not in (None, "")
-        }
-        return [CATEGORY_ALL] + sorted(categories, key=str.lower)
-
-    def _refresh_category_options(self) -> None:
-        """Atualiza as opções do filtro de categoria a partir da planilha
-        carregada, mantendo "Todos" como opção padrão."""
-        self.category_combobox["values"] = self._get_category_options()
-        self.category_var.set(CATEGORY_ALL)
-
-    def _apply_filters(self) -> list[dict[str, Any]]:
-        """Aplica o filtro de categoria e a pesquisa de texto simultaneamente."""
-        products = self.all_products
-        category = self.category_var.get()
-        if category and category != CATEGORY_ALL:
-            products = [
-                product for product in products if str(product.get("categoria", "")).strip() == category
-            ]
-        return self._apply_search_filter(self.search_var.get(), products)
-
-    def _on_category_change(self, _: Any = None) -> None:
-        """Atualiza a lista exibida conforme a categoria selecionada."""
-        self.filtered_products = self._apply_filters()
-        self._load_products_into_table()
-
-    def _format_count(self, value: int) -> str:
-        """Formata um número inteiro com separador de milhar (padrão pt-BR)."""
-        return f"{value:,}".replace(",", ".")
-
-    def _load_products_into_table(self) -> None:
-        """Carrega a lista de produtos filtrados na Treeview de produtos."""
-        self.product_tree.delete(*self.product_tree.get_children())
-
-        for product in self.filtered_products:
-            selected = product["_id"] in self.selected_product_ids
-            self.product_tree.insert(
+    def _load_jueri_results_table(self) -> None:
+        self.jueri_results_tree.delete(*self.jueri_results_tree.get_children())
+        for index, product in enumerate(self.jueri_last_search_results):
+            self.jueri_results_tree.insert(
                 "",
                 "end",
-                iid=product["_id"],
+                iid=str(index),
                 values=(
-                    "✓" if selected else "",
-                    self._format_value(product.get("codigo")),
-                    self._format_value(product.get("descricao")),
-                    self._format_value(product.get("categoria")),
-                    self._format_value(product.get("qtd")),
-                    self._format_value(product.get("preco")),
-                    self._format_value(product.get("numero")),
+                    product.codigo_barras or "—",
+                    product.descricao or "—",
+                    self._resolve_jueri_category(product) or "—",
+                    self._format_jueri_stock(product.quantidade),
+                    self._format_jueri_date(product.data_criacao),
+                    self._format_jueri_price(product.preco_principal),
                 ),
             )
+        self.jueri_result_count_var.set(str(len(self.jueri_last_search_results)))
 
-        visible_ids = {product["_id"] for product in self.filtered_products}
-        self.product_tree.selection_set(list(self.selected_product_ids.intersection(visible_ids)))
-        self._refresh_counts()
+    def _on_sort_jueri_column(self, column: str) -> None:
+        self.jueri_last_search_results = self._jueri_sorter.sort(self.jueri_last_search_results, column)
+        self._load_jueri_results_table()
 
-        if self.selected_product_ids:
-            selected_product = next((product for product in self.filtered_products if product["_id"] in self.selected_product_ids), None)
-            if selected_product is not None:
-                self._current_product = selected_product
-                self._draw_label_preview(selected_product)
-                return
+    def _on_jueri_select_all_shortcut(self, _event: Any = None) -> str:
+        self.jueri_results_tree.selection_set(self.jueri_results_tree.get_children())
+        return "break"
 
-        self._draw_preview_placeholder()
-    def _refresh_counts(self) -> None:
-        """Atualiza os contadores de produtos carregados, selecionados e etiquetas."""
-        self.loaded_products_count = len(self.all_products)
-        self.selected_products_count = len(self.selected_product_ids)
-        self.labels_to_print_count = sum(
-            self._parse_quantity(product.get("qtd"))
-            for product in self.all_products
-            if not self.selected_product_ids or product["_id"] in self.selected_product_ids
-        )
-
-        self.loaded_count_var.set(f"Produtos carregados: {self.loaded_products_count}")
-        self.selected_count_var.set(f"Selecionados: {self.selected_products_count}")
-        self.labels_count_var.set(f"Etiquetas: {self.labels_to_print_count}")
-        self.filter_summary_var.set(
-            f"Total: {self._format_count(self.loaded_products_count)} | "
-            f"Exibindo: {self._format_count(len(self.filtered_products))} | "
-            f"Selecionados: {self._format_count(self.selected_products_count)}"
-        )
-        self._refresh_bottom_status()
-
-    def _refresh_bottom_status(self) -> None:
-        """Atualiza a barra de status inferior com informações de modo, impressora e status atual."""
-        printer = self.printer_var.get() or "Impressora padrão"
-        layout = self.layout_var.get() or "Layout Padrão"
-        status_text = self.batch_status_var.get() or self.status_var.get()
-        self.bottom_status_var.set(
-            f"Produtos carregados: {self.loaded_products_count} | Visíveis: {len(self.filtered_products)} | Selecionados: {self.selected_products_count} | Etiquetas: {self.labels_to_print_count} | Impressora: {printer} | Layout: {layout} | Status: {status_text}"
-        )
-
-    def _parse_quantity(self, value: Any) -> int:
-        """Converte valores de quantidade para inteiro, considerando vazios como 1 e zero como zero."""
-        if value is None:
-            return 1
-        if isinstance(value, str) and value.strip() == "":
-            return 1
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return 1
-
-    def _fill_quick_details(self, product: dict):
-        """Preenche os campos de detalhes do produto na interface."""
-        self.quick_code_display_var.set(self._format_value(product.get("codigo")))
-        self.quick_category_var.set(self._format_value(product.get("categoria")))
-        self.quick_description_var.set(self._format_value(product.get("descricao")))
-        self.quick_number_var.set(self._format_value(product.get("numero")))
-        self.quick_price_var.set(self._format_value(product.get("preco")))
-        self._current_product = product
-        self._draw_label_preview(product)
-
-    def _on_test_print(self):
-        """Envia uma etiqueta de teste para a impressora selecionada."""
-        if not self.printer_var.get():
-            messagebox.showwarning(APP_TITLE, "Selecione uma impressora antes de testar a impressão.")
+    def _on_add_jueri_selection_to_queue(self) -> None:
+        """Reenvia à fila produtos já presentes na tabela de histórico —
+        útil quando o usuário quer adicionar de novo sem reabrir a
+        pesquisa. Mesma conversão/destino que a confirmação da janela de
+        pesquisa usa (Product.to_catalog_product() -> CatalogTab). Não
+        muda de aba (Melhoria 1)."""
+        selected_ids = self.jueri_results_tree.selection()
+        if not selected_ids:
+            messagebox.showinfo(APP_TITLE, "Selecione ao menos um produto para adicionar à fila.")
             return
 
-        test_product = {
-            "codigo": "999999",
-            "categoria": "TESTE",
-            "descricao": "ETIQUETA TESTE",
-            "numero": "",
-            "preco": 0.0,
-        }
-        self._current_product = test_product
-        self._draw_label_preview(test_product)
+        products = [
+            self.jueri_last_search_results[int(iid)]
+            for iid in selected_ids
+            if 0 <= int(iid) < len(self.jueri_last_search_results)
+        ]
+        added = 0
+        updated = 0
+        for product in products:
+            catalog_product = product.to_catalog_product(self._jueri_categories_api)
+            if self.catalog_tab.print_queue.contains(catalog_product):
+                updated += 1
+            else:
+                added += 1
+            self.catalog_tab.add_product_to_queue(catalog_product)
 
-        self.printer_service = PrinterService(self.printer_var.get())
-        try:
-            zpl = ZplBuilder().build(test_product)
-            self.printer_service.print_raw(zpl)
-            self.status_var.set(
-                "Status: Teste de impressão enviado (ZPL). Etiqueta: 30 mm x 15 mm."
-            )
-            messagebox.showinfo(APP_TITLE, "Etiqueta de teste enviada para a impressora.")
-        except Exception as exc:
-            self.status_var.set(f"Status: Falha ao testar a impressão: {exc}")
-            messagebox.showerror(APP_TITLE, f"Não foi possível enviar a etiqueta de teste: {exc}")
+        self._refresh_jueri_queue_summary()
+        self.jueri_toast.show(describe_queue_addition(added, updated))
 
+    def _on_clear_jueri_results(self) -> None:
+        self.jueri_last_search_results = []
+        self._load_jueri_results_table()
 
-    def _clear_quick_details(self):
-        """Limpa os campos de detalhes do produto."""
-        self.quick_code_display_var.set("—")
-        self.quick_category_var.set("—")
-        self.quick_description_var.set("—")
-        self.quick_number_var.set("—")
-        self.quick_price_var.set("—")
-        self._current_product = None
-        self._draw_preview_placeholder()
+    @staticmethod
+    def _format_jueri_price(preco: float | None) -> str:
+        return f"R$ {preco:.2f}" if preco is not None else "—"
 
-    def _format_value(self, value):
-        """Formata valores para exibição na interface."""
-        if value is None:
+    @staticmethod
+    def _format_jueri_stock(quantidade: int | None) -> str:
+        return str(quantidade) if quantidade is not None else "—"
+
+    @staticmethod
+    def _format_jueri_date(raw: str | None) -> str:
+        if not raw:
             return "—"
-        if isinstance(value, float):
-            return f"{value:.2f}"
-        return str(value)
-
-    def _draw_preview_placeholder(self):
-        """Desenha a pré-visualização vazia da etiqueta."""
-        self._render_preview_image(None)
-
-    def _draw_label_preview(self, product: dict):
-        """Desenha a etiqueta com os dados do produto."""
-        self._render_preview_image(product)
-
-    def _on_preview_resize(self, _: Any) -> None:
-        """Redesenha a pré-visualização quando o canvas é redimensionado."""
-        if self.selected_product_ids and self._current_product is not None:
-            self._render_preview_image(self._current_product)
-        else:
-            self._render_preview_image(None)
-
-    def _render_preview_image(self, product: dict | None) -> None:
-        width = self.preview_canvas.winfo_width()
-        height = self.preview_canvas.winfo_height()
-        if width < 10 or height < 10:
-            return
-
-        self.preview_canvas.delete("all")
-        self.preview_canvas.create_rectangle(4, 4, width - 4, height - 4, outline="#e2e8f0", width=2)
-
-        if product is None:
-            self.preview_canvas.create_text(
-                width / 2,
-                height / 2,
-                text="Selecione um produto",
-                font=("Segoe UI", 11, "bold"),
-                fill="#64748b",
-            )
-            self._preview_image_ref = None
-            return
-
-        image = self.label_renderer.render_image(product) if self.label_renderer is not None else None
-        if image is None:
-            self.preview_canvas.create_text(
-                width / 2,
-                height / 2,
-                text="Selecione um produto",
-                font=("Segoe UI", 11, "bold"),
-                fill="#64748b",
-            )
-            self._preview_image_ref = None
-            return
-
-        image_ratio = image.width / image.height
-        canvas_ratio = width / height
-        if canvas_ratio > image_ratio:
-            target_height = min(height - 24, image.height)
-            target_width = int(target_height * image_ratio)
-        else:
-            target_width = min(width - 24, image.width)
-            target_height = int(target_width / image_ratio)
-
-        target_width = max(1, target_width)
-        target_height = max(1, target_height)
-
-        resized = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        self._preview_image_ref = ImageTk.PhotoImage(resized)
-        self.preview_canvas.create_image(width / 2, height / 2, image=self._preview_image_ref)
-
-    def _save_config(self) -> None:
-        """Salva as preferências atuais do usuário no arquivo de configuração."""
-        self.config["last_mode"] = self.mode_var.get()
-        self.config["last_spreadsheet"] = self.excel_path_var.get()
-        self.config["last_printer"] = self.printer_var.get()
-        self.config["last_layout"] = self.layout_var.get()
-        self.config["window_geometry"] = self.root.winfo_geometry()
-        self.config_manager.save(self.config)
-
-    def _load_spreadsheet(self, file_path: str) -> bool:
-        """Carrega a planilha informada no reader e atualiza tabela/preview.
-
-        Retorna True se a planilha foi carregada com sucesso, False se o
-        arquivo tinha erro (planilha inválida, colunas faltando etc.)."""
-        self.excel_path_var.set(file_path)
-        self.reader = ExcelReader(file_path)
-
-        if self.reader.error_message:
-            messagebox.showerror(APP_TITLE, self.reader.error_message)
-            self.status_var.set(f"Status: {self.reader.error_message}")
-            self.all_products = []
-            self._refresh_category_options()
-            self.filtered_products = []
-            self.selected_product_ids.clear()
-            self._load_products_into_table()
-            return False
-
-        self.all_products = self._get_product_list_from_reader()
-        self._refresh_category_options()
-        self.filtered_products = self._apply_filters()
-        self.selected_product_ids.clear()
-        self._load_products_into_table()
-        self.status_var.set(f"Status: Planilha carregada com {len(self.all_products)} produtos.")
-        return True
-
-    def _on_select_excel(self) -> None:
-        """Abre o diálogo para selecionar um arquivo Excel e carrega os produtos."""
-        file_path = filedialog.askopenfilename(
-            title="Selecione a planilha Excel",
-            filetypes=[("Arquivos Excel", "*.xlsx"), ("Todos os arquivos", "*")],
-        )
-        if not file_path:
-            return
-
-        if self._load_spreadsheet(file_path):
-            self._save_config()
-
-    def _load_last_spreadsheet(self) -> None:
-        """Carrega automaticamente a última planilha utilizada, se ela ainda existir.
-
-        Se o arquivo não existir mais, limpa last_spreadsheet do config.json
-        e avisa o usuário, deixando o restante da abertura seguir normalmente.
-        """
-        last_spreadsheet = self.config.get("last_spreadsheet")
-        if not last_spreadsheet:
-            return
-
-        if not Path(last_spreadsheet).exists():
-            self.config.pop("last_spreadsheet", None)
-            self.config_manager.save(self.config)
-            messagebox.showwarning(
-                APP_TITLE,
-                "A última planilha utilizada não foi encontrada. Selecione uma planilha para continuar.",
-            )
-            return
-
-        self._load_spreadsheet(last_spreadsheet)
-
-    def _on_search_change(self) -> None:
-        """Atualiza a lista exibida conforme o texto de pesquisa."""
-        self.filtered_products = self._apply_filters()
-        self._load_products_into_table()
-
-    def _on_ctrl_f_shortcut(self, event: tk.Event | None = None) -> str:
-        """Atalho Ctrl+F: leva o foco à pesquisa e seleciona o texto existente."""
-        self.search_entry.focus_set()
-        if self.search_var.get():
-            self.search_entry.select_range(0, tk.END)
-            self.search_entry.icursor(tk.END)
-        return "break"
-
-    def _on_search_escape(self, event: tk.Event | None = None) -> str:
-        """Atalho ESC no campo de pesquisa: limpa a busca, mantendo a
-        categoria selecionada (a lista já se atualiza sozinha via o trace
-        existente em search_var)."""
-        self.search_var.set("")
-        return "break"
-
-    def _on_search_enter(self, event: tk.Event | None = None) -> str:
-        """Atalho Enter no campo de pesquisa: aciona 'Imprimir Selecionados'."""
-        self._on_print_selected()
-        return "break"
-
-    def _on_table_select_all_shortcut(self, event: tk.Event | None = None) -> str:
-        """Atalho Ctrl+A com a tabela em foco: seleciona todos os produtos
-        atualmente exibidos (após filtros)."""
-        self._select_all()
-        return "break"
-
-    def _on_table_select(self, _: Any) -> None:
-        """Atualiza a seleção interna ao selecionar linhas na tabela e redesenha a pré-visualização."""
-        self.selected_product_ids = set(self.product_tree.selection())
-        self._refresh_counts()
-
-        if self.selected_product_ids:
-            selected_id = next(iter(self.selected_product_ids))
-            product = next((product for product in self.filtered_products if product["_id"] == selected_id), None)
-            if product is not None:
-                self._current_product = product
-                self._draw_label_preview(product)
-
-    def _on_table_double_click(self, event: tk.Event) -> None:
-        """Alterna a seleção do produto duplo clicado e atualiza a pré-visualização."""
-        item_id = self.product_tree.identify_row(event.y)
-        if not item_id:
-            return
-
-        if item_id in self.selected_product_ids:
-            self.selected_product_ids.remove(item_id)
-        else:
-            self.selected_product_ids.add(item_id)
-
-        self._load_products_into_table()
-
-        product = next((product for product in self.filtered_products if product["_id"] == item_id), None)
-        if product:
-            self._current_product = product
-            self._draw_label_preview(product)
-
-    def _on_table_press(self, event: tk.Event) -> None:
-        """Marca a linha inicial do clique, para um possível arraste de
-        seleção contínua, e aplica o clique simples existente (alternar a
-        coluna de seleção) — no press, exatamente como sempre foi, antes de
-        qualquer arraste acontecer."""
-        self._drag_anchor_id = self.product_tree.identify_row(event.y)
-        self._drag_active = False
-        self._on_table_click(event)
-
-    def _on_table_drag(self, event: tk.Event) -> None:
-        """Estende a seleção continuamente enquanto o botão esquerdo é
-        arrastado sobre a tabela.
-
-        Usa a mesma seleção nativa do Treeview (`selection_set`) que todo o
-        resto do app já lê via `<<TreeviewSelect>>` — o contador e a preview
-        continuam atualizando sozinhos por `_on_table_select`, sem nenhuma
-        lógica de seleção duplicada aqui. Só recalcula quando o intervalo
-        realmente muda, para não recriar a seleção a cada pixel de
-        movimento (evita cintilação).
-        """
-        if not self._drag_anchor_id:
-            return
-
-        target_id = self.product_tree.identify_row(event.y)
-        if not target_id:
-            return
-
-        if target_id != self._drag_anchor_id:
-            self._drag_active = True
-
-        if not self._drag_active:
-            return
-
-        all_ids = self.product_tree.get_children("")
-        if self._drag_anchor_id not in all_ids or target_id not in all_ids:
-            return
-
-        start = all_ids.index(self._drag_anchor_id)
-        end = all_ids.index(target_id)
-        if start > end:
-            start, end = end, start
-        range_ids = all_ids[start : end + 1]
-
-        if set(range_ids) == set(self.product_tree.selection()):
-            return
-
-        self.product_tree.selection_set(range_ids)
-
-    def _on_table_release(self, event: tk.Event) -> None:
-        """Finaliza o arraste."""
-        self._drag_anchor_id = None
-        self._drag_active = False
-
-    def _on_table_click(self, event: tk.Event) -> None:
-        """Permite marcar/desmarcar a seleção clicando na coluna de seleção."""
-        column = self.product_tree.identify_column(event.x)
-        item_id = self.product_tree.identify_row(event.y)
-        if column == "#1" and item_id:
-            if item_id in self.selected_product_ids:
-                self.selected_product_ids.remove(item_id)
-            else:
-                self.selected_product_ids.add(item_id)
-            self._load_products_into_table()
-
-    def _select_all(self) -> None:
-        """Seleciona todos os produtos exibidos na tabela."""
-        self.selected_product_ids = {product["_id"] for product in self.filtered_products}
-        self._load_products_into_table()
-
-    def _deselect_all(self) -> None:
-        """Desmarca todos os produtos."""
-        self.selected_product_ids.clear()
-        self._load_products_into_table()
-
-    def _invert_selection(self) -> None:
-        """Inverte a seleção dos produtos exibidos atualmente."""
-        current_ids = {product["_id"] for product in self.filtered_products}
-        self.selected_product_ids = {product_id for product_id in current_ids if product_id not in self.selected_product_ids}
-        self._load_products_into_table()
-
-    def _sort_table(self, column: str) -> None:
-        """Ordena a tabela de produtos por uma coluna específica."""
-        if not self.filtered_products:
-            return
-
-        if self.sort_column == column:
-            self.sort_reverse = not self.sort_reverse
-        else:
-            self.sort_column = column
-            self.sort_reverse = False
-
-        key_map = {
-            "selecionar": lambda item: item["_id"] in self.selected_product_ids,
-            "codigo": lambda item: str(item.get("codigo", "")) if item.get("codigo") is not None else "",
-            "descricao": lambda item: str(item.get("descricao", "")) if item.get("descricao") is not None else "",
-            "categoria": lambda item: str(item.get("categoria", "")) if item.get("categoria") is not None else "",
-            "qtd": lambda item: self._parse_int(item.get("qtd")) or 0,
-            "preco": lambda item: float(item.get("preco")) if item.get("preco") is not None else 0.0,
-            "numero": lambda item: str(item.get("numero", "")) if item.get("numero") is not None else "",
-        }
-
-        sort_key = key_map.get(column, lambda item: item.get(column, ""))
-        self.filtered_products.sort(key=sort_key, reverse=self.sort_reverse)
-        self._load_products_into_table()
-
-    def _get_print_products(self) -> list[dict[str, Any]]:
-        """Retorna a lista de produtos a serem impressos, de acordo com o modo de impressão."""
-        if self.reader is None or self.reader.error_message:
-            return []
-
-        if self.quantity_mode_var.get() == "range":
-            start = self._parse_int(self.from_var.get())
-            end = self._parse_int(self.to_var.get())
-            if start is None or end is None or start > end:
-                return []
-            return build_batch_product_list(self.reader, "range", start, end)
-
-        return build_batch_product_list(self.reader, "all")
-
-    def _start_print_job(self, products: list[dict[str, Any]]) -> None:
-        """Inicia o trabalho de impressão em um thread separado."""
-        if not products:
-            messagebox.showwarning(APP_TITLE, "Nenhum produto selecionado para impressão.")
-            return
-
-        if self.batch_thread is not None and self.batch_thread.is_alive():
-            messagebox.showwarning(APP_TITLE, "Há um trabalho de impressão em andamento.")
-            return
-
-        self.batch_cancelled = False
-        self.batch_progress_var.set(0.0)
-        self.batch_status_var.set("Iniciando impressão em lote...")
-        self.batch_current_var.set("")
-
-        self.batch_thread = threading.Thread(target=self._run_batch_print, args=(products,), daemon=True)
-        self.batch_thread.start()
-
-    def _run_batch_print(self, products: list[dict[str, Any]]) -> None:
-        """Executa a impressão em lote agrupando etiquetas em linhas de 3 colunas.
-
-        O rolo é calibrado fisicamente para 3 colunas por linha, então cada
-        job enviado precisa preencher a linha inteira (build_row) — um job de
-        coluna única faz a impressora repetir o conteúdo nas colunas restantes.
-        """
-        try:
-            self.printer_service = PrinterService(self.printer_var.get())
-            zpl_builder = ZplBuilder()
-
-            labels: list[LabelData] = []
-            for product in products:
-                label = LabelData(
-                    codigo=product.get("codigo"),
-                    descricao=product.get("descricao"),
-                    categoria=product.get("categoria"),
-                    numero=product.get("numero"),
-                    preco=product.get("preco"),
-                )
-                labels.extend([label] * self._parse_quantity(product.get("qtd")))
-
-            rows = [
-                labels[i : i + BATCH_ROW_COLUMNS]
-                for i in range(0, len(labels), BATCH_ROW_COLUMNS)
-            ]
-            total_rows = len(rows)
-
-            for index, row in enumerate(rows, start=1):
-                if self.batch_cancelled:
-                    break
-
-                progress = index / total_rows * 100
-                self.root.after(0, self.batch_progress_var.set, progress)
-                self.root.after(0, self.batch_status_var.set, f"Imprimindo linha {index} de {total_rows}...")
-                codigos = ", ".join(str(label.codigo) for label in row)
-                self.root.after(0, self.batch_current_var.set, f"Código(s): {codigos}")
-
-                row_width = BATCH_COLUMN_PITCH * BATCH_ROW_COLUMNS
-                zpl = zpl_builder.build_row(row, column_pitch=BATCH_COLUMN_PITCH, total_width=row_width)
-                self.printer_service.print_raw(zpl)
-                time.sleep(0.05)
-
-            if self.batch_cancelled:
-                self.root.after(0, self.batch_status_var.set, "Impressão em lote cancelada.")
-            else:
-                self.root.after(0, self.batch_progress_var.set, 100.0)
-                self.root.after(0, self.batch_status_var.set, "Impressão em lote concluída.")
-
-            self.root.after(0, self.batch_current_var.set, "")
-        except Exception as exc:
-            self.root.after(0, self.batch_status_var.set, f"Falha na impressão: {exc}")
-            self.root.after(0, messagebox.showerror, APP_TITLE, f"Não foi possível concluir a impressão: {exc}")
-
-    def _cancel_batch_print(self) -> None:
-        """Cancela o trabalho de impressão em lote em execução."""
-        self.batch_cancelled = True
-        self.batch_status_var.set("Solicitação de cancelamento recebida...")
-
-    def _on_print_selected(self) -> None:
-        """Imprime apenas os produtos que foram selecionados na tabela."""
-        if not self.selected_product_ids:
-            messagebox.showwarning(
-                APP_TITLE,
-                "Nenhum produto selecionado.\n\n"
-                "Selecione um ou mais produtos na lista e clique novamente em "
-                "'Imprimir Selecionados'.",
-            )
-            return
-
-        products = [product for product in self.all_products if product["_id"] in self.selected_product_ids]
-        self._start_print_job(products)
-
-    def _on_print(self) -> None:
-        """Aciona impressão rápida ou selescionada dependendo do modo atual."""
-        if self.mode_var.get() == "quick":
-            if self._current_product is None:
-                messagebox.showwarning(APP_TITLE, "Pesquise um produto antes de imprimir.")
-                return
-
-            self.printer_service = PrinterService(self.printer_var.get())
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
             try:
-                copies = self._parse_quantity(self._current_product.get("qtd"))
-                self.printer_service.print_raw(ZplBuilder().build(self._current_product), copies=copies)
-                self.status_var.set("Status: Etiqueta rápida enviada para impressão.")
-            except Exception as exc:
-                self.status_var.set(f"Status: Falha ao imprimir a etiqueta rápida: {exc}")
-                messagebox.showerror(APP_TITLE, f"Não foi possível imprimir a etiqueta rápida: {exc}")
-        else:
-            self._on_print_selected()
-
-    def _on_batch_print(self) -> None:
-        """Aciona a impressão em lote com base nos parâmetros atuais."""
-        if self.mode_var.get() == "quick":
-            messagebox.showwarning(APP_TITLE, "O modo de impressão rápida não suporta impressão em lote.")
-            return
-
-        products = self._get_print_products()
-        if not products:
-            messagebox.showwarning(APP_TITLE, "Nenhum produto disponível para impressão em lote.")
-            return
-
-        self._start_print_job(products)
-
-    def _on_quick_search(self, _: Any) -> None:
-        """Busca o produto informado no modo de impressão rápida."""
-        if self.reader is None or self.reader.error_message:
-            messagebox.showwarning(APP_TITLE, "Carregue uma planilha antes de buscar um produto.")
-            return
-
-        code = self.quick_code_var.get().strip()
-        if not code:
-            messagebox.showwarning(APP_TITLE, "Digite um código para buscar.")
-            return
-
-        product = self.reader.buscar_produto(code)
-        if product is None:
-            messagebox.showinfo(APP_TITLE, "Produto não encontrado.")
-            self._clear_quick_details()
-            return
-
-        self._fill_quick_details(product)
-
-
-def build_batch_product_list(reader: ExcelReader, mode: str, start: int | None = None, end: int | None = None) -> list[dict]:
-    """Seleciona os produtos para impressão em lote com base no modo escolhido."""
-    if reader is None or not getattr(reader, "rows", None):
-        return []
-
-    rows = list(reader.rows)
-    if mode == "range":
-        if start is None or end is None or start > end:
-            return []
-        start_index = start - 1
-        end_index = end
-        if start_index < 0:
-            start_index = 0
-        if end_index > len(rows):
-            end_index = len(rows)
-        selected_rows = rows[start_index:end_index]
-    else:
-        selected_rows = rows
-
-    products = []
-    for row in selected_rows:
-        product = {
-            "codigo": row.get("CODIGO"),
-            "categoria": row.get("CATEGORIA"),
-            "descricao": row.get("DESCRICAO"),
-            "numero": row.get("NUMERO"),
-            "preco": row.get("PRECO"),
-            "qtd": row.get("QTD"),
-        }
-        products.append(product)
-    return products
+                return datetime.strptime(raw, fmt).strftime("%d/%m/%Y")
+            except ValueError:
+                continue
+        return str(raw)

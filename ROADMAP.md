@@ -1,6 +1,6 @@
 # Roadmap — Santa Rubi Label Studio
 
-Este roadmap reflete o estado logo após o congelamento da `v3.0-stable`.
+Este roadmap reflete o marco oficial `v1.0.1 — Estabilidade Consolidada`.
 Para o que já foi entregue em detalhe, ver [CHANGELOG.md](CHANGELOG.md) e
 [DOCUMENTACAO_CHECKPOINT.md](DOCUMENTACAO_CHECKPOINT.md).
 
@@ -30,30 +30,56 @@ Para o que já foi entregue em detalhe, ver [CHANGELOG.md](CHANGELOG.md) e
 - **Eliminação de duplicação arquitetural** (`v3.0-stable`) — constantes
   físicas centralizadas em `core/print_layout.py`; `LabelData` tipado
   substitui o `list[dict]` entre `PrintQueueAdapter` e `ZplBuilder`.
+- **Estabilidade Consolidada** (`v1.0.1`) — integração completa com API
+  Jueri, fluxo único via `PrintQueue`, integração Planilha Excel + API,
+  Launcher, persistência, favoritos, pesquisas recentes, seleção múltipla,
+  busca por múltiplos códigos e por data, rolagem durante seleção e
+  tratamento definitivo de descrições longas sem reticências.
+- **Qualidade automatizada** — todos os testes automatizados aprovados no
+  fechamento do marco.
+
+## Camada de negócio congelada
+
+A partir da `v1.0.1`, os componentes abaixo não devem sofrer alterações
+durante a implementação do Design System, salvo bug crítico ou solicitação
+explícita:
+
+- `PrintQueue`;
+- `Product`;
+- `CatalogProduct`;
+- `PrinterService`;
+- `ZplBuilder`;
+- API Jueri;
+- fluxo de impressão;
+- fluxo Excel;
+- conversões;
+- persistência;
+- Launcher.
+
+O congelamento abrange regras de negócio, arquitetura e fluxos existentes.
 
 ## Em desenvolvimento
 
-Nenhuma frente de código aberta no momento — a `v3.0-stable` acaba de ser
-congelada e esta rodada de documentação é o fechamento oficial do ciclo.
+Nenhuma alteração de negócio está aberta. O próximo ciclo é exclusivamente
+visual.
 
-## Próximas versões
+## Próxima versão
 
-Sem compromisso de ordem ou prazo; candidatas priorizadas pelo que já foi
-identificado como lacuna real:
+### v1.1.0 — Design System Santa Rubi
 
-- **Tratamento mais específico de erros de impressão** — distinguir
-  "impressora offline", "sem permissão", "sem papel" em vez de uma
-  mensagem genérica de exceção (`_on_print_job_error` hoje mostra o texto
-  cru da exceção).
-- **Edição de quantidade também na aba "Impressão"** (hoje só a Fila de
-  Impressão do Catálogo Integrado permite ajustar quantidade diretamente
-  na interface).
-- **Distribuição do sistema** — empacotar como executável Windows
-  (ex.: PyInstaller), eliminando a necessidade de ambiente Python/venv na
-  máquina do usuário final.
-- **Funcionalidades administrativas** — histórico de impressões na
-  própria interface (a base já existe em `data/print_log.txt`), painel de
-  favoritos/atalhos de produtos mais impressos.
+Objetivo: modernizar exclusivamente a interface do sistema.
+
+Escopo:
+
+- layout;
+- cores;
+- ícones;
+- Splash Screen;
+- componentes;
+- UX;
+- microinterações.
+
+Restrições do ciclo: não alterar regras de negócio, arquitetura ou fluxos.
 
 ## Ideias futuras
 

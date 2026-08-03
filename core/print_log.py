@@ -1,8 +1,8 @@
 """Log de trabalhos de impressão da Fila de Impressão (Catálogo Integrado).
 
-Uma linha por trabalho concluído (sucesso ou falha) em data/print_log.txt:
-horário, quantidade de produtos, quantidade total de etiquetas, tempo total
-e resultado.
+Uma linha por trabalho concluído (sucesso ou falha) em
+%LOCALAPPDATA%/Santa Rubi Label Studio/print_log.txt: horário, quantidade
+de produtos, quantidade total de etiquetas, tempo total e resultado.
 """
 
 from __future__ import annotations
@@ -10,7 +10,9 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-DEFAULT_LOG_FILE = Path(__file__).resolve().parents[1] / "data" / "print_log.txt"
+from core.config import APP_DATA_DIR
+
+DEFAULT_LOG_FILE = APP_DATA_DIR / "print_log.txt"
 
 
 def log_print_job(

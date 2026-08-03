@@ -37,7 +37,11 @@ from core.print_log import log_print_job
 from core.print_queue import PrintQueue
 from core.print_queue_adapter import PrintQueueAdapter
 from core.printer import PrinterService
+from core.queue_feedback import describe_queue_addition
+from core.table_state import apply_column_widths, get_column_widths
 from core.zpl_builder import ZplBuilder
+from ui.toast import Toast
+from ui.treeview_selection import enable_drag_selection
 
 APP_TITLE = "Santa Rubi Label Studio"
 
@@ -73,6 +77,10 @@ class CatalogTab:
         self.print_queue = PrintQueue()
         self._selected_queue_codigo: str | None = None
         self._printing_in_progress = False
+        # Widgets de cada cartão da fila, por código — permite atualizar só
+        # a quantidade do item alterado (+/- ou edição direta) sem
+        # reconstruir a lista inteira, preservando scroll/seleção/foco.
+        self._queue_card_widgets: dict[str, dict[str, tk.Widget]] = {}
         self._tk_root = parent.winfo_toplevel()
         self.printer_var = tk.StringVar(value=self.config.get("last_printer", ""))
 
@@ -188,7 +196,8 @@ class CatalogTab:
         self.category_combobox.bind("<<ComboboxSelected>>", self._on_category_filter_change)
 
         ttk.Label(filters_row, text="Pesquisar produto").grid(row=0, column=2, sticky="w", pady=(0, 2))
-        ttk.Entry(filters_row, textvariable=self.catalog_search_var).grid(row=1, column=2, sticky="ew")
+        self.catalog_search_entry = ttk.Entry(filters_row, textvariable=self.catalog_search_var)
+        self.catalog_search_entry.grid(row=1, column=2, sticky="ew")
         self.catalog_search_var.trace_add("write", lambda *_: self._on_catalog_search_change())
 
         # --- Tabela — ocupa praticamente toda a largura e altura restantes ---
@@ -217,18 +226,20 @@ class CatalogTab:
         self.catalog_tree.bind("<Control-a>", self._on_select_all_products_shortcut)
         self.catalog_tree.bind("<Control-A>", self._on_select_all_products_shortcut)
 
-        # As colunas (exceto Quantidade, ver nota abaixo) são clicáveis para
-        # ordenar — cada uma só aciona service.sort_by(campo); adicionar um
-        # novo critério não exige tocar em nada aqui além de registrar o
-        # campo no SORT_KEY_FUNCTIONS do CatalogService.
+        # Seleção contínua por clique+arraste (mantém Ctrl/Shift-clique
+        # nativos) — mesmo componente usado pela pesquisa Jueri.
+        enable_drag_selection(self.catalog_tree)
+
+        # Todas as colunas são clicáveis para ordenar — cada uma só aciona
+        # service.sort_by(campo); adicionar um novo critério não exige
+        # tocar em nada aqui além de registrar o campo no
+        # SORT_KEY_FUNCTIONS do CatalogService.
         self.catalog_tree.heading("fornecedor", text="Fornecedor", command=lambda: self._on_sort_column("fornecedor"))
         self.catalog_tree.heading("codigo", text="Código", command=lambda: self._on_sort_column("codigo"))
         self.catalog_tree.heading("descricao", text="Descrição", command=lambda: self._on_sort_column("descricao"))
         self.catalog_tree.heading("categoria", text="Categoria", command=lambda: self._on_sort_column("categoria"))
         self.catalog_tree.heading("numeracao", text="Numeração", command=lambda: self._on_sort_column("numeracao"))
-        # Quantidade não tem critério de ordenação no CatalogService —
-        # cabeçalho sem comando, só exibição.
-        self.catalog_tree.heading("quantidade", text="Quantidade")
+        self.catalog_tree.heading("quantidade", text="Quantidade", command=lambda: self._on_sort_column("quantidade"))
         self.catalog_tree.heading("preco", text="Preço", command=lambda: self._on_sort_column("preco"))
 
         self.catalog_tree.column("fornecedor", anchor="w", width=90, minwidth=70, stretch=False)
@@ -250,6 +261,12 @@ class CatalogTab:
             footer, text="Adicionar à Fila", style="Primary.TButton", command=self._on_add_to_queue
         )
         self.add_to_queue_button.grid(row=0, column=1, sticky="e")
+
+        self.catalog_toast_label = tk.Label(
+            footer, text="", font=("Segoe UI", 9, "bold"), anchor="w", justify="left"
+        )
+        self.catalog_toast_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.catalog_toast = Toast(self.catalog_toast_label)
 
         # --- Painel lateral direito: Fila de Impressão ---
         self._build_print_queue_panel(container)
@@ -302,7 +319,7 @@ class CatalogTab:
         )
         self.remove_from_queue_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.clear_queue_button = ttk.Button(
-            queue_buttons, text="Limpar Fila", command=self._on_clear_queue, state="disabled"
+            queue_buttons, text="Limpar Fila (Ctrl+L)", command=self._on_clear_queue, state="disabled"
         )
         self.clear_queue_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
@@ -315,7 +332,11 @@ class CatalogTab:
         self.queue_printer_combobox.bind("<<ComboboxSelected>>", self._on_queue_printer_selected)
 
         self.print_queue_button = ttk.Button(
-            queue_panel, text="Imprimir Fila", style="Primary.TButton", command=self._on_print_queue, state="disabled"
+            queue_panel,
+            text="Imprimir Fila (Ctrl+P)",
+            style="Primary.TButton",
+            command=self._on_print_queue,
+            state="disabled",
         )
         self.print_queue_button.grid(row=5, column=0, sticky="ew", pady=(8, 0))
 
@@ -373,14 +394,29 @@ class CatalogTab:
             messagebox.showinfo(APP_TITLE, "Selecione ao menos um produto para adicionar à fila.")
             return
 
+        added = 0
+        updated = 0
         for iid in selected_ids:
             product = self.catalog_filtered_products[int(iid)]
-            print_item = self.service.create_print_item(product)
             if self.print_queue.contains(product):
-                self.print_queue.increment(product, amount=print_item.quantity)
+                updated += 1
             else:
-                self.print_queue.add(product, quantity=print_item.quantity)
+                added += 1
+            print_item = self.service.create_print_item(product)
+            self.print_queue.add_or_increment(product, quantity=print_item.quantity)
 
+        self._refresh_queue_view()
+        self.catalog_toast.show(describe_queue_addition(added, updated))
+
+    def add_product_to_queue(self, product: CatalogProduct) -> None:
+        """Ponto de entrada público para origens externas ao Catálogo
+        Integrado (ex.: seleção múltipla na pesquisa Jueri) alimentarem
+        esta mesma fila — reaproveita exatamente a mesma PrintQueue e a
+        mesma regra de deduplicação usada pela tabela do catálogo, sem
+        nenhuma lógica nova. A quantidade inicial vem de
+        attributes["default_quantity"] (mesma convenção do Excel)."""
+        default_quantity = product.attributes.get("default_quantity")
+        self.print_queue.add_or_increment(product, quantity=default_quantity)
         self._refresh_queue_view()
 
     def _on_remove_from_queue(self) -> None:
@@ -420,7 +456,8 @@ class CatalogTab:
         if item is None:
             return
         self.print_queue.increment(item.product)
-        self._refresh_queue_view()
+        self._update_card_quantity_display(codigo, item.quantity)
+        self._update_queue_summary()
 
     def _on_decrement_queue_item(self, codigo: str) -> None:
         if self._printing_in_progress:
@@ -429,7 +466,19 @@ class CatalogTab:
         if item is None:
             return
         self.print_queue.decrement(item.product)
-        self._refresh_queue_view()
+        self._update_card_quantity_display(codigo, item.quantity)
+        self._update_queue_summary()
+
+    def _update_card_quantity_display(self, codigo: str, quantity: int) -> None:
+        """Atualiza só o texto de quantidade do cartão deste produto — não
+        reconstrói a fila inteira. Corrige o bug de usabilidade em que
+        alterar a quantidade fazia a lista voltar ao topo: como nenhum
+        cartão é destruído/recriado, a posição do scroll, a seleção e o
+        foco de todos os itens (inclusive os outros, não só este)
+        permanecem exatamente como estavam."""
+        widgets = self._queue_card_widgets.get(codigo)
+        if widgets is not None:
+            widgets["quantity_label"].configure(text=str(quantity))
 
     def _on_delete_key(self, codigo: str) -> None:
         if self._printing_in_progress:
@@ -468,6 +517,11 @@ class CatalogTab:
         entry.focus_set()
         entry.select_range(0, "end")
 
+        widgets = self._queue_card_widgets.setdefault(codigo, {})
+        widgets["quantity_row"] = quantity_row
+        widgets["quantity_label"] = quantity_label
+        widgets["quantity_entry"] = entry
+
         def commit(_event: Any = None) -> None:
             entry.unbind("<FocusOut>")
             self._commit_quantity_edit(codigo, entry_var.get())
@@ -478,8 +532,10 @@ class CatalogTab:
     def _commit_quantity_edit(self, codigo: str, raw_value: str) -> None:
         """Aplica a edição direta via PrintQueue.update_quantity(). Se o
         valor digitado não for um número, a fila não é alterada — o
-        próximo _refresh_queue_view() simplesmente redesenha o valor
-        anterior, sem lançar exceção."""
+        cartão simplesmente volta a mostrar o valor anterior, sem lançar
+        exceção. Só o cartão deste produto é atualizado (ver
+        _update_card_quantity_display) — os demais, o scroll e a seleção
+        não são tocados."""
         item = self._find_queue_item_by_codigo(codigo)
         if item is None:
             self._refresh_queue_view()
@@ -489,7 +545,24 @@ class CatalogTab:
         if parsed is not None:
             self.print_queue.update_quantity(item.product, parsed)
 
-        self._refresh_queue_view()
+        self._end_edit_quantity(codigo, item.quantity)
+        self._update_queue_summary()
+
+    def _end_edit_quantity(self, codigo: str, quantity: int) -> None:
+        """Fecha o modo de edição: remove o Entry temporário (se houver) e
+        volta a exibir o rótulo de quantidade, já atualizado — sem
+        redesenhar a fila inteira."""
+        widgets = self._queue_card_widgets.get(codigo)
+        if widgets is None:
+            return
+
+        entry = widgets.pop("quantity_entry", None)
+        if entry is not None:
+            entry.destroy()
+
+        quantity_label = widgets["quantity_label"]
+        quantity_label.configure(text=str(quantity))
+        quantity_label.pack(side="left", padx=4)
 
     def _refresh_queue_view(self) -> None:
         """Único ponto de atualização da fila — chamado sempre que o
@@ -502,6 +575,7 @@ class CatalogTab:
     def _render_queue_cards(self) -> None:
         for child in self.queue_items_frame.winfo_children():
             child.destroy()
+        self._queue_card_widgets = {}
 
         selected_card: tk.Frame | None = None
 
@@ -547,6 +621,12 @@ class CatalogTab:
                     lambda _event, codigo=codigo_do_item, row=quantity_row, label=quantidade_label:
                         self._on_start_edit_quantity(codigo, row, label),
                 )
+
+            self._queue_card_widgets[codigo_do_item] = {
+                "card": card,
+                "quantity_row": quantity_row,
+                "quantity_label": quantidade_label,
+            }
 
             tk.Button(
                 quantity_row, text="+", width=2, state=edit_controls_state,
@@ -945,3 +1025,40 @@ class CatalogTab:
             return f"Última atualização: {parsed.strftime('%d/%m/%Y %H:%M')}"
         except ValueError:
             return f"Última atualização: {value}"
+
+    # ------------------------------------------------------------------
+    # Persistência de interface — usada pela MainWindow (atalho Ctrl+F e
+    # salvamento/restauração de largura de colunas e ordenação ao
+    # fechar/abrir o programa). Nenhuma lógica de catálogo é alterada.
+    # ------------------------------------------------------------------
+
+    def focus_search_entry(self) -> None:
+        """Atalho global Ctrl+F (ver MainWindow._on_ctrl_f_shortcut) —
+        leva o foco direto ao campo de pesquisa desta aba."""
+        self.catalog_search_entry.focus_set()
+        if self.catalog_search_var.get():
+            self.catalog_search_entry.select_range(0, tk.END)
+            self.catalog_search_entry.icursor(tk.END)
+
+    def get_persisted_state(self) -> dict[str, Any]:
+        """Estado desta tela a ser salvo no config.json — largura de
+        colunas e ordenação ativa da tabela do catálogo."""
+        state: dict[str, Any] = {"column_widths": get_column_widths(self.catalog_tree)}
+        if self._sort_field is not None:
+            state["sort"] = {"field": self._sort_field, "reverse": self._sort_reverse}
+        return state
+
+    def apply_persisted_state(self, state: dict[str, Any]) -> None:
+        """Restaura o estado salvo por get_persisted_state() — chamado uma
+        vez na abertura do programa, depois que o catálogo já foi
+        carregado (a ordenação só pode ser aplicada com o service pronto)."""
+        widths = state.get("column_widths")
+        if widths:
+            apply_column_widths(self.catalog_tree, widths)
+
+        sort = state.get("sort")
+        if sort and sort.get("field") and self.service is not None:
+            self._sort_field = sort["field"]
+            self._sort_reverse = bool(sort.get("reverse", False))
+            self.service.sort_by(self._sort_field, reverse=self._sort_reverse)
+            self._refresh_catalog_view()

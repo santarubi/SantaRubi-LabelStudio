@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import patch
 
 from core.catalog_datasource import DataSource
+from core.catalog_product import CatalogProduct
 from core.catalog_repository import CatalogRepository
 from core.catalog_service import CatalogService
 from core.catalog_settings import CatalogSettings
@@ -212,6 +213,95 @@ class CatalogTabPrintQueueTests(unittest.TestCase):
             self.tab._on_add_to_queue()
             mock_showinfo.assert_called_once()
         self.assertTrue(self.tab.print_queue.is_empty())
+
+
+class CatalogTabAddProductToQueueTests(unittest.TestCase):
+    """add_product_to_queue() é o ponto de entrada usado pela seleção
+    múltipla da pesquisa Jueri (ver ui/product_search_dialog.py e
+    Product.to_catalog_product()) — prova que produtos de origem externa
+    entram na MESMA fila, sem nenhuma tabela/estado paralelo."""
+
+    def setUp(self) -> None:
+        if not _tk_available():
+            self.skipTest("ambiente de teste sem display Tk disponível")
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.config: dict[str, Any] = {}
+        self.tab = CatalogTab(self.root, FakeConfigManager(), self.config)
+
+    def tearDown(self) -> None:
+        self.root.destroy()
+
+    def _jueri_product(self, codigo: str = "181021", quantidade_estoque=3) -> CatalogProduct:
+        return CatalogProduct(
+            codigo=codigo,
+            descricao="ALIANCA",
+            preco=75.9,
+            categoria="AÇO INOX - DOURADO",
+            numeracao="30",
+            fornecedor="Jueri",
+            attributes={"default_quantity": quantidade_estoque, "quantidade_estoque": quantidade_estoque},
+        )
+
+    def test_adds_product_to_the_same_print_queue(self):
+        product = self._jueri_product()
+
+        self.tab.add_product_to_queue(product)
+
+        self.assertEqual(self.tab.print_queue.count(), 1)
+        self.assertTrue(self.tab.print_queue.contains(product))
+
+    def test_initial_quantity_comes_from_default_quantity_attribute(self):
+        """Etapa 4: quantidade para imprimir nasce igual ao estoque atual."""
+        product = self._jueri_product(quantidade_estoque=7)
+
+        self.tab.add_product_to_queue(product)
+
+        self.assertEqual(self.tab.print_queue.find(product).quantity, 7)
+
+    def test_missing_default_quantity_falls_back_to_one(self):
+        product = self._jueri_product(quantidade_estoque=None)
+
+        self.tab.add_product_to_queue(product)
+
+        self.assertEqual(self.tab.print_queue.find(product).quantity, 1)
+
+    def test_adding_the_same_product_again_sums_instead_of_duplicating(self):
+        self.tab.add_product_to_queue(self._jueri_product("181021", quantidade_estoque=3))
+        self.tab.add_product_to_queue(self._jueri_product("181021", quantidade_estoque=3))
+
+        self.assertEqual(self.tab.print_queue.count(), 1)
+        self.assertEqual(self.tab.print_queue.find(self._jueri_product("181021")).quantity, 6)
+
+    def test_refreshes_the_queue_view_counters(self):
+        self.tab.add_product_to_queue(self._jueri_product(quantidade_estoque=4))
+
+        self.assertEqual(self.tab.queue_count_var.get(), "Produtos na fila: 1")
+        self.assertEqual(self.tab.queue_total_var.get(), "Total de etiquetas: 4")
+
+    def test_coexists_with_products_added_from_the_catalog_table(self):
+        """Compatibilidade: a mesma fila recebe itens do Catálogo
+        Integrado (Excel) e da pesquisa Jueri lado a lado, sem conflito."""
+        source = FakeDataSource(
+            {"DIP-15": [{"CODIGO": "1001", "DESCRICAO": "Anel Coração", "PRECO": 59.9,
+                         "CATEGORIA": "Aneis", "NUMERO": "16", "QTD": 5}]}
+        )
+        settings = CatalogSettings(selected_sheets=["DIP-15"], column_map=COLUMN_MAP)
+        repository = CatalogRepository(source)
+        service = CatalogService(repository, settings)
+        service.reload()
+        self.tab.service = service
+        self.tab.catalog_filtered_products = service.apply_filters()
+        self.tab._load_catalog_table()
+        self.tab.catalog_tree.selection_set(["0"])
+        self.tab._on_add_to_queue()
+
+        self.tab.add_product_to_queue(self._jueri_product("181021", quantidade_estoque=3))
+
+        self.assertEqual(self.tab.print_queue.count(), 2)
+        codigos = {item.product.codigo for item in self.tab.print_queue.items()}
+        self.assertEqual(codigos, {"1001", "181021"})
+        self.assertEqual(self.tab.queue_count_var.get(), "Produtos na fila: 2")
 
 
 if __name__ == "__main__":

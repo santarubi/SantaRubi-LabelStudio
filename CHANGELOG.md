@@ -4,6 +4,39 @@ Todas as versões abaixo têm o detalhamento completo em
 [DOCUMENTACAO_CHECKPOINT.md](DOCUMENTACAO_CHECKPOINT.md), no capítulo/
 checkpoint de mesmo nome.
 
+## [v1.0.1] - Estabilidade Consolidada
+
+Marco oficial de estabilidade do Santa Rubi Label Studio antes do início
+da modernização visual. Esta versão representa a base estável do sistema,
+com arquitetura, integrações, fluxos operacionais e impressão consolidados.
+
+### Consolidado
+- Arquitetura estabilizada.
+- Integração completa com a API Jueri.
+- Fluxo único de impressão via `PrintQueue`.
+- Integração entre Planilha Excel e API Jueri.
+- Launcher funcional.
+- Persistência de configurações.
+- Favoritos e pesquisas recentes.
+- Seleção múltipla de produtos.
+- Busca por múltiplos códigos e busca por data.
+- Correção da rolagem automática durante a seleção por arraste.
+- Correção definitiva da impressão de descrições longas, preservando a
+  largura física e impedindo sobreposição.
+- Remoção das reticências no corte de descrições impressas.
+- Todos os testes automatizados aprovados.
+
+### Congelamento da camada de negócio
+A partir desta versão, toda a camada de negócio está oficialmente
+**congelada** durante a implementação do Design System. Isso inclui:
+`PrintQueue`, `Product`, `CatalogProduct`, `PrinterService`, `ZplBuilder`,
+API Jueri, fluxo de impressão, fluxo Excel, conversões, persistência e
+Launcher.
+
+Esses componentes somente poderão ser alterados diante da descoberta de
+bug crítico ou de solicitação explícita. O ciclo seguinte deve se limitar
+à interface, sem modificar regras de negócio, arquitetura ou fluxos.
+
 ## [v3.0-stable] - Catálogo Integrado + arquitetura de impressão consolidada
 
 Checkpoint oficial de congelamento da arquitetura. Cobre todo o ciclo de
