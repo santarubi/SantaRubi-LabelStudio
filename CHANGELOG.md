@@ -4,6 +4,95 @@ Todas as versões abaixo têm o detalhamento completo em
 [DOCUMENTACAO_CHECKPOINT.md](DOCUMENTACAO_CHECKPOINT.md), no capítulo/
 checkpoint de mesmo nome.
 
+## [v1.2.0] - 2026-10-24
+
+### Changed
+- A fila de impressão passou a ser uma área única, redimensionável e sempre
+  visível na lateral direita das abas API Jueri e Planilha Excel.
+- A pesquisa Jueri passou a funcionar integralmente na aba principal, sem abrir
+  uma janela secundária no fluxo operacional.
+- O status Jueri e a última sincronização ficam somente no cabeçalho global; o
+  identificador técnico do cliente permanece restrito às configurações.
+- A fila identifica a origem (Jueri/Excel), exibe preço e quantidade, aceita
+  seleção múltipla com Ctrl+clique e pede confirmação antes de ser limpa.
+- A pesquisa Jueri ganhou filtros combináveis de estoque, categoria, texto e
+  datas, além de ordenação por código, descrição, cadastro, preço e estoque.
+- As tabelas Jueri e Excel exibem categoria, subcategoria, numeração, preço e
+  estoque quando esses dados existem, sem alterar o conteúdo das etiquetas.
+- O mapeamento de colunas Excel inicia recolhido em instalações configuradas;
+  arquivo e seleção de abas permanecem acessíveis durante a operação.
+- As chamadas da pesquisa Jueri agora rodam fora da thread da
+  interface; resultados obsoletos são descartados quando uma busca nova começa.
+
+### Persistence
+- Filtros Jueri, direção de ordenação e proporção da fila global são gravados no
+  `config.json` existente sem substituir credenciais ou preferências antigas.
+
+### Compatibility
+- Fornecedor não foi implementado como filtro Jueri porque o endpoint/modelo de
+  produtos atualmente usado não fornece esse campo; o controle indisponível não
+  é exibido.
+- Motor ZPL, dimensões, layout físico de três colunas e envio RAW ao spooler
+  Windows permaneceram inalterados.
+- O build v1.2.0 é publicado em diretório versionado próprio, preservando os
+  artefatos homologados da v1.1.2.
+- Versão final homologada e publicada em produção após validação funcional,
+  smoke tests do Launcher e do EXE e validação de impressão em equipamento real.
+
+## [v1.1.2] - Release Build
+
+### Changed
+- Versão do produto padronizada em uma única fonte (`app/version.py`).
+- Build formal de produção separado em `release/`, mantendo o Launcher
+  exclusivamente no fluxo de desenvolvimento.
+- PyInstaller one-file de produção explicitamente configurado com `upx=False`.
+- Metadados do Windows atualizados para `1.1.2`.
+
+### Added
+- Pipeline reproduzível `scripts/build_release.py`, com dependências fixadas em
+  `requirements-release.txt`.
+- Validações de arquitetura x64, conteúdo empacotado, recursos, versão e
+  ausência de arquivos pessoais.
+- Geração de `RELEASE_INFO.txt` com data, tamanho e SHA-256.
+- Ponto opcional de assinatura Authenticode antes do cálculo do hash.
+
+### Notes
+- Nenhuma regra de negócio, integração, interface funcional, impressão, ZPL ou
+  layout físico de etiqueta foi alterado nesta versão.
+
+## [v1.0.1] - Estabilidade Consolidada
+
+Marco oficial de estabilidade do Santa Rubi Label Studio antes do início
+da modernização visual. Esta versão representa a base estável do sistema,
+com arquitetura, integrações, fluxos operacionais e impressão consolidados.
+
+### Consolidado
+- Arquitetura estabilizada.
+- Integração completa com a API Jueri.
+- Fluxo único de impressão via `PrintQueue`.
+- Integração entre Planilha Excel e API Jueri.
+- Launcher funcional.
+- Persistência de configurações.
+- Favoritos e pesquisas recentes.
+- Seleção múltipla de produtos.
+- Busca por múltiplos códigos e busca por data.
+- Correção da rolagem automática durante a seleção por arraste.
+- Correção definitiva da impressão de descrições longas, preservando a
+  largura física e impedindo sobreposição.
+- Remoção das reticências no corte de descrições impressas.
+- Todos os testes automatizados aprovados.
+
+### Congelamento da camada de negócio
+A partir desta versão, toda a camada de negócio está oficialmente
+**congelada** durante a implementação do Design System. Isso inclui:
+`PrintQueue`, `Product`, `CatalogProduct`, `PrinterService`, `ZplBuilder`,
+API Jueri, fluxo de impressão, fluxo Excel, conversões, persistência e
+Launcher.
+
+Esses componentes somente poderão ser alterados diante da descoberta de
+bug crítico ou de solicitação explícita. O ciclo seguinte deve se limitar
+à interface, sem modificar regras de negócio, arquitetura ou fluxos.
+
 ## [v3.0-stable] - Catálogo Integrado + arquitetura de impressão consolidada
 
 Checkpoint oficial de congelamento da arquitetura. Cobre todo o ciclo de

@@ -175,6 +175,48 @@ class PrintQueueIncrementTests(unittest.TestCase):
         self.assertEqual(queue.find(product).quantity, 1)
 
 
+class PrintQueueAddOrIncrementTests(unittest.TestCase):
+    """Formaliza o comportamento que a interface do Catálogo Integrado já
+    tinha (implícito): reaproveitado por qualquer origem nova que
+    alimente a fila (ex.: pesquisa Jueri)."""
+
+    def test_adds_new_item_when_absent(self):
+        queue = PrintQueue()
+        product = _product("1001")
+        item = queue.add_or_increment(product, quantity=3)
+        self.assertEqual(item.quantity, 3)
+        self.assertEqual(queue.count(), 1)
+
+    def test_sums_quantity_instead_of_duplicating_when_present(self):
+        queue = PrintQueue()
+        product = _product("1001")
+        queue.add(product, quantity=5)
+
+        item = queue.add_or_increment(_product("1001"), quantity=5)
+
+        self.assertEqual(item.quantity, 10)
+        self.assertEqual(queue.count(), 1, "nao deveria criar uma segunda linha para o mesmo codigo")
+
+    def test_default_quantity_is_one(self):
+        queue = PrintQueue()
+        product = _product("1001")
+        queue.add_or_increment(product)
+        self.assertEqual(queue.find(product).quantity, 1)
+
+    def test_normalizes_quantity_when_adding(self):
+        queue = PrintQueue()
+        item = queue.add_or_increment(_product("1001"), quantity=0)
+        self.assertEqual(item.quantity, 1)
+
+    def test_repeated_calls_never_duplicate_the_row(self):
+        queue = PrintQueue()
+        product = _product("1001")
+        for _ in range(4):
+            queue.add_or_increment(product, quantity=2)
+        self.assertEqual(queue.count(), 1)
+        self.assertEqual(queue.find(product).quantity, 8)
+
+
 class PrintQueueDecrementTests(unittest.TestCase):
     def test_decrement_reduces_existing_quantity(self):
         queue = PrintQueue()

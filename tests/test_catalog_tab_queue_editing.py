@@ -233,18 +233,23 @@ class CatalogTabQueueEditingTests(unittest.TestCase):
         except Exception as exc:  # pragma: no cover - a falha e' o proprio teste
             self.fail(f"_commit_quantity_edit nao deveria levantar excecao: {exc}")
 
-    def test_edit_redraws_from_print_queue_only(self):
-        """Depois de confirmar, o cartao exibido deve vir de um redesenho
-        completo (_refresh_queue_view), nao de uma atualizacao manual do
-        widget antigo — o Entry usado na edicao deixa de existir."""
+    def test_edit_commit_updates_label_without_rebuilding_the_card(self):
+        """Correção do bug de scroll (v1.1): depois de confirmar, o MESMO
+        cartão é reaproveitado (não é destruído/recriado) — só o Entry
+        temporário de edição deixa de existir, substituído de volta pelo
+        rótulo, já com o valor novo."""
         self._add_both_to_queue()
+        card_before = self._find_card(self.product_a.codigo)
         quantity_row, quantity_label = self._quantity_widgets(self.product_a.codigo)
         self.tab._on_start_edit_quantity(self.product_a.codigo, quantity_row, quantity_label)
 
         self.tab._commit_quantity_edit(self.product_a.codigo, "8")
 
-        _, new_quantity_label = self._quantity_widgets(self.product_a.codigo)
+        card_after, new_quantity_label = (self._find_card(self.product_a.codigo), self._quantity_widgets(self.product_a.codigo)[1])
+        self.assertIs(card_after, card_before)
         self.assertEqual(new_quantity_label.cget("text"), "8")
+        entries = [w for w in quantity_row.winfo_children() if isinstance(w, tk.Entry)]
+        self.assertEqual(entries, [])
 
     # ------------------------------------------------------------------
     # Atalhos: DEL e Ctrl+A

@@ -79,6 +79,20 @@ class PrintQueue:
         self._items[index].quantity = normalize_quantity(quantity)
         return True
 
+    def add_or_increment(self, product: CatalogProduct, quantity: int = 1) -> PrintItem:
+        """Adiciona um item novo, ou soma `quantity` se o produto já
+        estiver na fila — nunca duplica linha para o mesmo código.
+
+        Formaliza aqui o comportamento que já existia (implícito) na
+        interface do Catálogo Integrado, para que qualquer origem nova de
+        produtos (ex.: pesquisa Jueri) reutilize exatamente a mesma regra
+        em vez de reimplementar o if/else "contains -> increment, senão
+        add" em cada lugar que alimenta a fila.
+        """
+        if self.contains(product):
+            return self.increment(product, amount=quantity)
+        return self.add(product, quantity=quantity)
+
     def increment(self, product: CatalogProduct, amount: int = 1) -> PrintItem:
         """Aumenta a quantidade do item (criando-o se ainda não existir).
         Nunca permite quantidade menor que 1."""

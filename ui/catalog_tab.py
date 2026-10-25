@@ -27,7 +27,13 @@ from core.catalog_excel_source import ExcelCatalogSource
 from core.catalog_product import CatalogProduct
 from core.catalog_repository import CatalogRepository
 from core.catalog_service import CATEGORY_ALL, SUPPLIER_ALL, CatalogService
-from core.catalog_settings import CATALOG_FIELD_LABELS, CATALOG_FIELDS, CatalogSettings
+from core.catalog_settings import (
+    CATALOG_FIELD_LABELS,
+    CATALOG_FIELDS,
+    CATALOG_MAPPING_FIELDS,
+    CATALOG_OPTIONAL_FIELDS,
+    CatalogSettings,
+)
 from core.catalog_validator import CatalogConfigurationValidator, ValidationReport
 from core.config import ConfigManager
 from core.label_data import LabelData
@@ -37,18 +43,43 @@ from core.print_log import log_print_job
 from core.print_queue import PrintQueue
 from core.print_queue_adapter import PrintQueueAdapter
 from core.printer import PrinterService
+from core.queue_feedback import describe_queue_addition
+from core.table_state import apply_column_widths, get_column_widths
 from core.zpl_builder import ZplBuilder
+from ui.toast import Toast
+from ui.treeview_selection import enable_drag_selection
+from ui.design_system import BORDER, PRIMARY, SELECTION, SURFACE, TEXT, MUTED_TEXT
 
 APP_TITLE = "Santa Rubi Label Studio"
+
+MAIN_PANEL_MIN_WIDTH = 540
+QUEUE_PANEL_MIN_WIDTH = 280
+CONFIGURATION_PANEL_MIN_HEIGHT = 260
+CONFIGURATION_COLLAPSED_MIN_HEIGHT = 150
+PRODUCTS_PANEL_MIN_HEIGHT = 220
 
 
 class CatalogTab:
     """Constrói e gerencia a aba do Catálogo Integrado (configuração + navegação)."""
 
-    def __init__(self, parent: tk.Widget, config_manager: ConfigManager, config: dict[str, Any]):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        config_manager: ConfigManager,
+        config: dict[str, Any],
+        queue_parent: tk.Widget | None = None,
+    ):
         self.config_manager = config_manager
         self.config = config
         self.settings = CatalogSettings.from_config(config)
+        # O mapeamento é configuração eventual: instalações já configuradas
+        # sempre começam recolhidas. Em uma instalação incompleta ele fica
+        # aberto para não esconder os controles necessários à correção.
+        self.settings.configuration_expanded = not bool(
+            self.settings.file_path
+            and self.settings.selected_sheets
+            and all(self.settings.column_map.get(field) for field in CATALOG_FIELDS)
+        )
 
         self.repository: CatalogRepository | None = None
         self.service: CatalogService | None = None
@@ -57,7 +88,7 @@ class CatalogTab:
         self.sheet_vars: dict[str, tk.BooleanVar] = {}
         self.column_vars: dict[str, tk.StringVar] = {
             internal_field: tk.StringVar(value=self.settings.column_map.get(internal_field, ""))
-            for internal_field in CATALOG_FIELDS
+            for internal_field in CATALOG_MAPPING_FIELDS
         }
 
         self.catalog_search_var = tk.StringVar()
@@ -72,11 +103,20 @@ class CatalogTab:
 
         self.print_queue = PrintQueue()
         self._selected_queue_codigo: str | None = None
+        self._selected_queue_codigos: set[str] = set()
         self._printing_in_progress = False
+        # Widgets de cada cartão da fila, por código — permite atualizar só
+        # a quantidade do item alterado (+/- ou edição direta) sem
+        # reconstruir a lista inteira, preservando scroll/seleção/foco.
+        self._queue_card_widgets: dict[str, dict[str, tk.Widget]] = {}
         self._tk_root = parent.winfo_toplevel()
         self.printer_var = tk.StringVar(value=self.config.get("last_printer", ""))
+        self._pending_horizontal_sash: int | None = None
+        self._pending_vertical_sash: int | None = None
+        self._pane_positions_restored = False
+        self._queue_is_global_lateral = queue_parent is not None
 
-        self._build_widgets(parent)
+        self._build_widgets(parent, queue_parent)
         self._load_printer_list()
 
         if self.settings.file_path:
@@ -87,24 +127,39 @@ class CatalogTab:
 
         self._refresh_queue_view()
 
-    def _build_widgets(self, parent: tk.Widget) -> None:
+    def _build_widgets(self, parent: tk.Widget, queue_parent: tk.Widget | None = None) -> None:
         container = ttk.Frame(parent, padding=12)
         container.pack(fill="both", expand=True)
-        container.grid_columnconfigure(0, weight=7)
-        container.grid_columnconfigure(1, weight=3, minsize=280)
-        container.grid_rowconfigure(0, weight=1)
+        self.horizontal_paned: ttk.Panedwindow | None
+        if queue_parent is None:
+            self.horizontal_paned = ttk.Panedwindow(container, orient="horizontal")
+            self.horizontal_paned.pack(fill="both", expand=True)
+            left_frame = ttk.Frame(self.horizontal_paned)
+            queue_frame = ttk.Frame(self.horizontal_paned)
+            self.horizontal_paned.add(left_frame, weight=1)
+            self.horizontal_paned.add(queue_frame, weight=0)
+        else:
+            self.horizontal_paned = None
+            left_frame = container
+            queue_frame = queue_parent
 
-        left_frame = ttk.Frame(container)
-        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        left_frame.grid_columnconfigure(0, weight=1)
+        self.vertical_paned = ttk.Panedwindow(left_frame, orient="vertical")
+        self.vertical_paned.pack(fill="both", expand=True)
+        configuration_area = ttk.Frame(self.vertical_paned)
+        products_area = ttk.Frame(self.vertical_paned)
+        self.vertical_paned.add(configuration_area, weight=0)
+        self.vertical_paned.add(products_area, weight=1)
+        configuration_area.grid_columnconfigure(0, weight=1)
+        configuration_area.grid_rowconfigure(1, weight=1)
+        products_area.grid_columnconfigure(0, weight=1)
 
         # --- Barra superior compacta: toggle do painel + ações + última atualização ---
-        top_bar = ttk.Frame(left_frame)
+        top_bar = ttk.Frame(configuration_area)
         top_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         top_bar.grid_columnconfigure(3, weight=1)
 
         self.toggle_config_button = ttk.Button(
-            top_bar, text="▼ Configuração", command=self._on_toggle_configuration
+            top_bar, text="Ocultar mapeamento de colunas", command=self._on_toggle_configuration
         )
         self.toggle_config_button.grid(row=0, column=0, padx=(0, 6))
         ttk.Button(
@@ -119,8 +174,30 @@ class CatalogTab:
 
         # --- Painel de configuração — recolhível (arquivo, abas, mapeamento,
         # resultado do teste). Ocultá-lo libera espaço para a tabela crescer. ---
-        self.config_panel = ttk.Frame(left_frame)
-        self.config_panel.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        self.config_scroll_area = ttk.Frame(configuration_area)
+        self.config_scroll_area.grid(row=1, column=0, sticky="nsew", pady=(0, 6))
+        self.config_scroll_area.grid_columnconfigure(0, weight=1)
+        self.config_scroll_area.grid_rowconfigure(0, weight=1)
+        self.config_canvas = tk.Canvas(self.config_scroll_area, highlightthickness=0, bg=SURFACE)
+        self.config_canvas.grid(row=0, column=0, sticky="nsew")
+        config_scrollbar = ttk.Scrollbar(
+            self.config_scroll_area, orient="vertical", command=self.config_canvas.yview
+        )
+        config_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.config_canvas.configure(yscrollcommand=config_scrollbar.set)
+
+        self.config_panel = ttk.Frame(self.config_canvas)
+        self._config_canvas_window = self.config_canvas.create_window(
+            (0, 0), window=self.config_panel, anchor="nw"
+        )
+        self.config_panel.bind(
+            "<Configure>",
+            lambda _event: self.config_canvas.configure(scrollregion=self.config_canvas.bbox("all")),
+        )
+        self.config_canvas.bind(
+            "<Configure>",
+            lambda event: self.config_canvas.itemconfigure(self._config_canvas_window, width=event.width),
+        )
         self.config_panel.grid_columnconfigure(0, weight=1)
 
         file_row = ttk.Frame(self.config_panel)
@@ -135,10 +212,9 @@ class CatalogTab:
         config_row = ttk.Frame(self.config_panel)
         config_row.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         config_row.grid_columnconfigure(0, weight=1)
-        config_row.grid_columnconfigure(1, weight=1)
 
         sheets_frame = ttk.LabelFrame(config_row, text="Abas", padding=8)
-        sheets_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        sheets_frame.grid(row=0, column=0, sticky="ew")
         self.sheets_container = ttk.Frame(sheets_frame)
         self.sheets_container.pack(fill="x")
         self.sheets_placeholder = ttk.Label(
@@ -146,28 +222,35 @@ class CatalogTab:
         )
         self.sheets_placeholder.pack(anchor="w")
 
-        mapping_frame = ttk.LabelFrame(config_row, text="Mapeamento de colunas", padding=8)
-        mapping_frame.grid(row=0, column=1, sticky="nsew")
+        self.mapping_details = ttk.Frame(config_row)
+        self.mapping_details.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.mapping_details.grid_columnconfigure(0, weight=1)
+
+        mapping_frame = ttk.LabelFrame(self.mapping_details, text="Mapeamento de colunas", padding=8)
+        mapping_frame.grid(row=0, column=0, sticky="ew")
         mapping_frame.grid_columnconfigure(1, weight=1)
         self.column_comboboxes: dict[str, ttk.Combobox] = {}
-        for row, internal_field in enumerate(CATALOG_FIELDS):
+        for row, internal_field in enumerate(CATALOG_MAPPING_FIELDS):
             ttk.Label(mapping_frame, text=CATALOG_FIELD_LABELS[internal_field]).grid(
                 row=row, column=0, sticky="w", padx=(0, 8), pady=2
             )
             combobox = ttk.Combobox(
-                mapping_frame, textvariable=self.column_vars[internal_field], state="readonly"
+                mapping_frame,
+                textvariable=self.column_vars[internal_field],
+                state="readonly",
+                style="CatalogConfig.TCombobox",
             )
             combobox.grid(row=row, column=1, sticky="ew", pady=2)
-            combobox.bind("<<ComboboxSelected>>", lambda _event: self._save_settings())
+            combobox.bind("<<ComboboxSelected>>", self._on_column_mapping_selected)
             self.column_comboboxes[internal_field] = combobox
 
-        report_frame = ttk.LabelFrame(self.config_panel, text="Resultado do teste", padding=8)
-        report_frame.grid(row=2, column=0, sticky="ew")
+        report_frame = ttk.LabelFrame(self.mapping_details, text="Resultado do teste", padding=8)
+        report_frame.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.report_text = tk.Text(report_frame, height=4, wrap="word", state="disabled")
         self.report_text.pack(fill="both", expand=True)
 
         # --- Linha intermediária: filtros (fornecedor, categoria, pesquisa) ---
-        filters_row = ttk.Frame(left_frame)
+        filters_row = ttk.Frame(products_area)
         filters_row.grid(row=2, column=0, sticky="ew", pady=(0, 6))
         filters_row.grid_columnconfigure(0, weight=0, minsize=160)
         filters_row.grid_columnconfigure(1, weight=0, minsize=160)
@@ -188,19 +271,30 @@ class CatalogTab:
         self.category_combobox.bind("<<ComboboxSelected>>", self._on_category_filter_change)
 
         ttk.Label(filters_row, text="Pesquisar produto").grid(row=0, column=2, sticky="w", pady=(0, 2))
-        ttk.Entry(filters_row, textvariable=self.catalog_search_var).grid(row=1, column=2, sticky="ew")
+        self.catalog_search_entry = ttk.Entry(filters_row, textvariable=self.catalog_search_var)
+        self.catalog_search_entry.grid(row=1, column=2, sticky="ew")
         self.catalog_search_var.trace_add("write", lambda *_: self._on_catalog_search_change())
 
         # --- Tabela — ocupa praticamente toda a largura e altura restantes ---
-        table_frame = ttk.Frame(left_frame)
+        table_frame = ttk.Frame(products_area)
         table_frame.grid(row=3, column=0, sticky="nsew")
-        left_frame.grid_rowconfigure(3, weight=1)
+        products_area.grid_rowconfigure(3, weight=1)
         table_frame.grid_columnconfigure(0, weight=1)
         table_frame.grid_rowconfigure(0, weight=1)
 
         self.catalog_tree = ttk.Treeview(
             table_frame,
-            columns=("fornecedor", "codigo", "descricao", "categoria", "numeracao", "quantidade", "preco"),
+            columns=(
+                "codigo",
+                "descricao",
+                "preco",
+                "numeracao",
+                "subcategoria",
+                "categoria",
+                "estoque",
+                "fornecedor",
+                "quantidade",
+            ),
             show="headings",
             # Seleção padrão do Treeview: clique único, Ctrl (múltipla) e
             # Shift (contínua) — necessário para "Adicionar à Fila" operar
@@ -209,38 +303,59 @@ class CatalogTab:
         )
         self.catalog_tree.grid(row=0, column=0, sticky="nsew")
         vertical_scroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.catalog_tree.yview)
-        self.catalog_tree.configure(yscrollcommand=vertical_scroll.set)
+        horizontal_scroll = ttk.Scrollbar(table_frame, orient="horizontal", command=self.catalog_tree.xview)
+        self.catalog_tree.configure(yscrollcommand=vertical_scroll.set, xscrollcommand=horizontal_scroll.set)
         vertical_scroll.grid(row=0, column=1, sticky="ns")
+        horizontal_scroll.grid(row=1, column=0, sticky="ew")
 
         # Atalho Ctrl+A: seleciona todos os produtos exibidos na tabela
         # principal (mesmo padrão já usado na aba "Impressão").
         self.catalog_tree.bind("<Control-a>", self._on_select_all_products_shortcut)
         self.catalog_tree.bind("<Control-A>", self._on_select_all_products_shortcut)
 
-        # As colunas (exceto Quantidade, ver nota abaixo) são clicáveis para
-        # ordenar — cada uma só aciona service.sort_by(campo); adicionar um
-        # novo critério não exige tocar em nada aqui além de registrar o
-        # campo no SORT_KEY_FUNCTIONS do CatalogService.
-        self.catalog_tree.heading("fornecedor", text="Fornecedor", command=lambda: self._on_sort_column("fornecedor"))
+        # Seleção contínua por clique+arraste (mantém Ctrl/Shift-clique
+        # nativos) — mesmo componente usado pela pesquisa Jueri.
+        enable_drag_selection(self.catalog_tree)
+
+        # Todas as colunas são clicáveis para ordenar — cada uma só aciona
+        # service.sort_by(campo); adicionar um novo critério não exige
+        # tocar em nada aqui além de registrar o campo no
+        # SORT_KEY_FUNCTIONS do CatalogService.
         self.catalog_tree.heading("codigo", text="Código", command=lambda: self._on_sort_column("codigo"))
         self.catalog_tree.heading("descricao", text="Descrição", command=lambda: self._on_sort_column("descricao"))
-        self.catalog_tree.heading("categoria", text="Categoria", command=lambda: self._on_sort_column("categoria"))
-        self.catalog_tree.heading("numeracao", text="Numeração", command=lambda: self._on_sort_column("numeracao"))
-        # Quantidade não tem critério de ordenação no CatalogService —
-        # cabeçalho sem comando, só exibição.
-        self.catalog_tree.heading("quantidade", text="Quantidade")
         self.catalog_tree.heading("preco", text="Preço", command=lambda: self._on_sort_column("preco"))
+        self.catalog_tree.heading("numeracao", text="Numeração", command=lambda: self._on_sort_column("numeracao"))
+        self.catalog_tree.heading("subcategoria", text="Subcategoria")
+        self.catalog_tree.heading("categoria", text="Categoria")
+        self.catalog_tree.heading("estoque", text="Estoque")
+        self.catalog_tree.heading("fornecedor", text="Fornecedor", command=lambda: self._on_sort_column("fornecedor"))
+        self.catalog_tree.heading(
+            "quantidade", text="Qtd. etiquetas", command=lambda: self._on_sort_column("quantidade")
+        )
 
-        self.catalog_tree.column("fornecedor", anchor="w", width=90, minwidth=70, stretch=False)
-        self.catalog_tree.column("codigo", anchor="center", width=80, minwidth=70, stretch=False)
-        self.catalog_tree.column("descricao", anchor="w", width=340, minwidth=180, stretch=True)
-        self.catalog_tree.column("categoria", anchor="w", width=130, minwidth=100, stretch=False)
-        self.catalog_tree.column("numeracao", anchor="center", width=80, minwidth=70, stretch=False)
-        self.catalog_tree.column("quantidade", anchor="center", width=80, minwidth=70, stretch=False)
-        self.catalog_tree.column("preco", anchor="e", width=90, minwidth=80, stretch=False)
+        if self._queue_is_global_lateral:
+            self.catalog_tree.column("codigo", anchor="center", width=65, minwidth=60, stretch=False)
+            self.catalog_tree.column("descricao", anchor="w", width=190, minwidth=130, stretch=True)
+            self.catalog_tree.column("preco", anchor="e", width=75, minwidth=70, stretch=False)
+            self.catalog_tree.column("numeracao", anchor="center", width=70, minwidth=65, stretch=False)
+            self.catalog_tree.column("subcategoria", anchor="w", width=130, minwidth=90, stretch=False)
+            self.catalog_tree.column("categoria", anchor="w", width=110, minwidth=80, stretch=False)
+            self.catalog_tree.column("estoque", anchor="center", width=70, minwidth=60, stretch=False)
+            self.catalog_tree.column("fornecedor", anchor="w", width=85, minwidth=65, stretch=False)
+            self.catalog_tree.column("quantidade", anchor="center", width=95, minwidth=85, stretch=False)
+        else:
+            self.catalog_tree.column("codigo", anchor="center", width=80, minwidth=70, stretch=False)
+            self.catalog_tree.column("descricao", anchor="w", width=280, minwidth=180, stretch=True)
+            self.catalog_tree.column("preco", anchor="e", width=90, minwidth=80, stretch=False)
+            self.catalog_tree.column("numeracao", anchor="center", width=90, minwidth=75, stretch=False)
+            self.catalog_tree.column("subcategoria", anchor="w", width=150, minwidth=100, stretch=False)
+            self.catalog_tree.column("categoria", anchor="w", width=130, minwidth=90, stretch=False)
+            self.catalog_tree.column("estoque", anchor="center", width=80, minwidth=70, stretch=False)
+            self.catalog_tree.column("fornecedor", anchor="w", width=100, minwidth=75, stretch=False)
+            self.catalog_tree.column("quantidade", anchor="center", width=105, minwidth=90, stretch=False)
 
         # --- Rodapé: contadores + ação de enviar a seleção para a fila ---
-        footer = ttk.Frame(left_frame)
+        footer = ttk.Frame(products_area)
         footer.grid(row=4, column=0, sticky="ew", pady=(6, 0))
         footer.grid_columnconfigure(0, weight=1)
         ttk.Label(footer, textvariable=self.catalog_summary_var, style="Subtitle.TLabel").grid(
@@ -251,33 +366,167 @@ class CatalogTab:
         )
         self.add_to_queue_button.grid(row=0, column=1, sticky="e")
 
+        self.catalog_toast_label = tk.Label(
+            footer, text="", bg=SURFACE, fg=TEXT,
+            font=("Segoe UI", 9, "bold"), anchor="w", justify="left"
+        )
+        self.catalog_toast_label.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.catalog_toast = Toast(self.catalog_toast_label)
+
         # --- Painel lateral direito: Fila de Impressão ---
-        self._build_print_queue_panel(container)
+        self._build_print_queue_panel(queue_frame)
 
         self._apply_configuration_visibility()
+        self._configure_resizable_panes()
+
+    def _configure_resizable_panes(self) -> None:
+        """Mantém as duas divisórias dentro de tamanhos seguros."""
+        if self.horizontal_paned is not None:
+            self.horizontal_paned.bind("<Configure>", lambda _event: self._clamp_horizontal_sash())
+        self.vertical_paned.bind("<Configure>", lambda _event: self._clamp_vertical_sash())
+        if self.horizontal_paned is not None:
+            self.horizontal_paned.bind("<Map>", lambda _event: self._restore_pane_positions())
+        self.vertical_paned.bind("<Map>", lambda _event: self._restore_pane_positions())
+        if self.horizontal_paned is not None:
+            self.horizontal_paned.bind(
+                "<Motion>", lambda event: self._update_pane_cursor(event, self.horizontal_paned, "sb_h_double_arrow")
+            )
+        self.vertical_paned.bind(
+            "<Motion>", lambda event: self._update_pane_cursor(event, self.vertical_paned, "sb_v_double_arrow")
+        )
+        if self.horizontal_paned is not None:
+            self.horizontal_paned.bind("<Leave>", lambda _event: self.horizontal_paned.configure(cursor=""))
+        self.vertical_paned.bind("<Leave>", lambda _event: self.vertical_paned.configure(cursor=""))
+        self._restore_pane_positions()
+
+    @staticmethod
+    def _update_pane_cursor(event: tk.Event, pane: ttk.Panedwindow, cursor: str) -> None:
+        """Exibe cursor de redimensionamento somente sobre a divisória."""
+        element = pane.identify(event.x, event.y)
+        pane.configure(cursor=cursor if element != "" else "")
+
+    @staticmethod
+    def _clamp(value: int, minimum: int, maximum: int) -> int:
+        return max(minimum, min(value, max(minimum, maximum)))
+
+    def _horizontal_bounds(self) -> tuple[int, int]:
+        if self.horizontal_paned is None:
+            return 0, 0
+        available = max(1, self.horizontal_paned.winfo_width() - 6)
+        minimum = min(MAIN_PANEL_MIN_WIDTH, max(1, available // 2))
+        maximum = max(minimum, available - min(QUEUE_PANEL_MIN_WIDTH, max(1, available // 2)))
+        return minimum, maximum
+
+    def _vertical_bounds(self) -> tuple[int, int]:
+        available = max(1, self.vertical_paned.winfo_height() - 6)
+        minimum_config = (
+            CONFIGURATION_PANEL_MIN_HEIGHT
+            if self.settings.configuration_expanded
+            else CONFIGURATION_COLLAPSED_MIN_HEIGHT
+        )
+        minimum_products = PRODUCTS_PANEL_MIN_HEIGHT
+        minimum = min(minimum_config, max(1, available // 2))
+        maximum = max(minimum, available - min(minimum_products, max(1, available // 2)))
+        return minimum, maximum
+
+    def _clamp_horizontal_sash(self, position: int | None = None) -> None:
+        if self.horizontal_paned is None:
+            return
+        if self.horizontal_paned.winfo_width() <= 1:
+            return
+        minimum, maximum = self._horizontal_bounds()
+        requested_position = self.horizontal_paned.sashpos(0) if position is None else position
+        safe_position = self._clamp(requested_position, minimum, maximum)
+        if safe_position != self.horizontal_paned.sashpos(0):
+            self.horizontal_paned.sashpos(0, safe_position)
+
+    def _clamp_vertical_sash(self, position: int | None = None) -> None:
+        if self.vertical_paned.winfo_height() <= 1:
+            return
+        minimum, maximum = self._vertical_bounds()
+        requested_position = self.vertical_paned.sashpos(0) if position is None else position
+        safe_position = self._clamp(requested_position, minimum, maximum)
+        if safe_position != self.vertical_paned.sashpos(0):
+            self.vertical_paned.sashpos(0, safe_position)
+
+    def _restore_pane_positions(self) -> None:
+        """Aplica posições persistidas depois que o Tk conhece o tamanho real."""
+        if self._pane_positions_restored:
+            return
+        if self.vertical_paned.winfo_height() <= 1:
+            return
+        if self.horizontal_paned is not None:
+            if self.horizontal_paned.winfo_width() <= 1:
+                return
+            if self._pending_horizontal_sash is None:
+                horizontal_default = int(self.horizontal_paned.winfo_width() * 0.7)
+                self._clamp_horizontal_sash(horizontal_default)
+            else:
+                self._clamp_horizontal_sash(self._pending_horizontal_sash)
+
+        if self._pending_vertical_sash is None:
+            vertical_default = int(self.vertical_paned.winfo_height() * 0.42)
+            self._clamp_vertical_sash(vertical_default)
+        else:
+            self._clamp_vertical_sash(self._pending_vertical_sash)
+        self._pane_positions_restored = True
 
     def _build_print_queue_panel(self, container: tk.Widget) -> None:
         queue_panel = ttk.Frame(container, style="Card.TFrame", padding=12)
-        queue_panel.grid(row=0, column=1, sticky="nsew")
+        queue_panel.pack(fill="both", expand=True)
         queue_panel.grid_columnconfigure(0, weight=1)
-        queue_panel.grid_rowconfigure(1, weight=1)
+        list_row = 1 if self._queue_is_global_lateral else 2
+        queue_panel.grid_rowconfigure(list_row, weight=1)
 
-        ttk.Label(queue_panel, text="Fila de Impressão", font=("Segoe UI", 12, "bold")).grid(
-            row=0, column=0, sticky="w", pady=(0, 8)
+        heading = ttk.Frame(queue_panel)
+        heading.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        heading.grid_columnconfigure(0, weight=1)
+        ttk.Label(heading, text="Fila de Impressão Universal", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.queue_count_var = tk.StringVar(value="Produtos na fila: 0")
+        self.queue_total_var = tk.StringVar(value="Total de etiquetas: 0")
+        ttk.Label(heading, textvariable=self.queue_count_var, style="Subtitle.TLabel").grid(
+            row=0, column=1, padx=(12, 0)
+        )
+        ttk.Label(heading, textvariable=self.queue_total_var, style="Subtitle.TLabel").grid(
+            row=0, column=2, padx=(12, 0)
         )
 
+        columns_header = ttk.Frame(queue_panel)
+        columns_header.grid(row=1, column=0, sticky="ew", padx=(4, 20))
+        columns_header.grid_columnconfigure(1, weight=1)
+        for column, text, width, anchor in (
+            (0, "Código", 14, "w"),
+            (1, "Descrição", 0, "w"),
+            (2, "Origem", 12, "w"),
+            (3, "Preço", 12, "e"),
+            (4, "Qtd. etiquetas", 16, ""),
+        ):
+            options = {"text": text, "style": "Subtitle.TLabel"}
+            if width:
+                options["width"] = width
+            ttk.Label(columns_header, **options).grid(row=0, column=column, sticky=anchor, padx=6)
+
+        if self._queue_is_global_lateral:
+            columns_header.grid_remove()
+            heading.grid_columnconfigure(1, weight=0)
+            heading.grid_columnconfigure(2, weight=0)
+            heading.winfo_children()[1].grid_configure(row=1, column=0, sticky="w", padx=0, pady=(4, 0))
+            heading.winfo_children()[2].grid_configure(row=2, column=0, sticky="w", padx=0)
+
         list_area = ttk.Frame(queue_panel)
-        list_area.grid(row=1, column=0, sticky="nsew")
+        list_area.grid(row=list_row, column=0, sticky="nsew", pady=(0, 8))
         list_area.grid_columnconfigure(0, weight=1)
         list_area.grid_rowconfigure(0, weight=1)
 
-        self.queue_canvas = tk.Canvas(list_area, highlightthickness=0, bg="#ffffff")
+        self.queue_canvas = tk.Canvas(list_area, highlightthickness=0, bg=SURFACE)
         self.queue_canvas.grid(row=0, column=0, sticky="nsew")
         queue_scrollbar = ttk.Scrollbar(list_area, orient="vertical", command=self.queue_canvas.yview)
         queue_scrollbar.grid(row=0, column=1, sticky="ns")
         self.queue_canvas.configure(yscrollcommand=queue_scrollbar.set)
 
-        self.queue_items_frame = tk.Frame(self.queue_canvas, bg="#ffffff")
+        self.queue_items_frame = tk.Frame(self.queue_canvas, bg=SURFACE)
         self._queue_canvas_window = self.queue_canvas.create_window((0, 0), window=self.queue_items_frame, anchor="nw")
         self.queue_items_frame.bind(
             "<Configure>", lambda _event: self.queue_canvas.configure(scrollregion=self.queue_canvas.bbox("all"))
@@ -286,38 +535,47 @@ class CatalogTab:
             "<Configure>", lambda event: self.queue_canvas.itemconfigure(self._queue_canvas_window, width=event.width)
         )
 
-        queue_footer = ttk.Frame(queue_panel)
-        queue_footer.grid(row=2, column=0, sticky="ew", pady=(8, 8))
-        self.queue_count_var = tk.StringVar(value="Produtos na fila: 0")
-        self.queue_total_var = tk.StringVar(value="Total de etiquetas: 0")
-        ttk.Label(queue_footer, textvariable=self.queue_count_var, style="Subtitle.TLabel").pack(anchor="w")
-        ttk.Label(queue_footer, textvariable=self.queue_total_var, style="Subtitle.TLabel").pack(anchor="w")
-
         queue_buttons = ttk.Frame(queue_panel)
-        queue_buttons.grid(row=3, column=0, sticky="ew")
+        actions_row = list_row + 1
+        queue_buttons.grid(row=actions_row, column=0, sticky="ew")
         queue_buttons.grid_columnconfigure(0, weight=1)
         queue_buttons.grid_columnconfigure(1, weight=1)
         self.remove_from_queue_button = ttk.Button(
-            queue_buttons, text="Remover", command=self._on_remove_from_queue, state="disabled"
+            queue_buttons, text="Remover Selecionados", command=self._on_remove_from_queue, state="disabled"
         )
         self.remove_from_queue_button.grid(row=0, column=0, sticky="ew", padx=(0, 4))
         self.clear_queue_button = ttk.Button(
-            queue_buttons, text="Limpar Fila", command=self._on_clear_queue, state="disabled"
+            queue_buttons,
+            text="Limpar Fila (Ctrl+L)",
+            style="Destructive.TButton",
+            command=self._confirm_clear_queue,
+            state="disabled",
         )
         self.clear_queue_button.grid(row=0, column=1, sticky="ew", padx=(4, 0))
 
         printer_row = ttk.Frame(queue_panel)
-        printer_row.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        printer_row.grid_columnconfigure(0, weight=1)
-        ttk.Label(printer_row, text="Impressora", style="Subtitle.TLabel").grid(row=0, column=0, sticky="w")
-        self.queue_printer_combobox = ttk.Combobox(printer_row, textvariable=self.printer_var, state="readonly")
-        self.queue_printer_combobox.grid(row=1, column=0, sticky="ew")
+        printer_row.grid(row=actions_row + 1, column=0, sticky="ew", pady=(8, 0))
+        printer_row.grid_columnconfigure(1, weight=1)
+        ttk.Label(printer_row, text="Impressora:", style="Subtitle.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 6)
+        )
+        self.queue_printer_combobox = ttk.Combobox(
+            printer_row, textvariable=self.printer_var, state="readonly", width=32
+        )
+        self.queue_printer_combobox.grid(row=0, column=1, sticky="ew")
         self.queue_printer_combobox.bind("<<ComboboxSelected>>", self._on_queue_printer_selected)
 
         self.print_queue_button = ttk.Button(
-            queue_panel, text="Imprimir Fila", style="Primary.TButton", command=self._on_print_queue, state="disabled"
+            printer_row,
+            text="Imprimir Fila (Ctrl+P)",
+            style="Primary.TButton",
+            command=self._on_print_queue,
+            state="disabled",
         )
-        self.print_queue_button.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        if self._queue_is_global_lateral:
+            self.print_queue_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        else:
+            self.print_queue_button.grid(row=0, column=2, padx=(8, 0))
 
     def _load_printer_list(self) -> None:
         """Popula o combobox de impressora e seleciona a última utilizada —
@@ -344,20 +602,32 @@ class CatalogTab:
         self.config_manager.save(self.config)
 
     def _on_toggle_configuration(self) -> None:
-        """Alterna o painel de configuração (arquivo/abas/mapeamento/
-        resultado do teste) entre visível e recolhido, liberando espaço
-        para a tabela crescer quando recolhido. Estado persistido."""
+        """Mostra/oculta somente o mapeamento; arquivo e abas permanecem."""
         self.settings.configuration_expanded = not self.settings.configuration_expanded
         self._apply_configuration_visibility()
         self._save_settings()
 
     def _apply_configuration_visibility(self) -> None:
         if self.settings.configuration_expanded:
-            self.config_panel.grid()
-            self.toggle_config_button.configure(text="▼ Configuração")
+            self.mapping_details.grid()
+            self.toggle_config_button.configure(text="Ocultar mapeamento de colunas")
+            requested_sash = CONFIGURATION_PANEL_MIN_HEIGHT
         else:
-            self.config_panel.grid_remove()
-            self.toggle_config_button.configure(text="▶ Configuração")
+            self.mapping_details.grid_remove()
+            self.toggle_config_button.configure(text="Mostrar mapeamento de colunas")
+            requested_sash = CONFIGURATION_COLLAPSED_MIN_HEIGHT
+            for combobox in self.column_comboboxes.values():
+                combobox.selection_clear()
+            self.toggle_config_button.focus_set()
+        self._clamp_vertical_sash(requested_sash)
+
+    def _on_column_mapping_selected(self, event: tk.Event) -> None:
+        """Persiste a escolha e remove apenas o realce visual do combobox."""
+        self._save_settings()
+        combobox = event.widget
+        if isinstance(combobox, ttk.Combobox):
+            combobox.selection_clear()
+        self._tk_root.after_idle(self.toggle_config_button.focus_set)
 
     # ------------------------------------------------------------------
     # Fila de Impressão — a interface nunca manipula listas de PrintItem
@@ -373,33 +643,56 @@ class CatalogTab:
             messagebox.showinfo(APP_TITLE, "Selecione ao menos um produto para adicionar à fila.")
             return
 
+        added = 0
+        updated = 0
         for iid in selected_ids:
             product = self.catalog_filtered_products[int(iid)]
-            print_item = self.service.create_print_item(product)
             if self.print_queue.contains(product):
-                self.print_queue.increment(product, amount=print_item.quantity)
+                updated += 1
             else:
-                self.print_queue.add(product, quantity=print_item.quantity)
+                added += 1
+            print_item = self.service.create_print_item(product)
+            self.print_queue.add_or_increment(product, quantity=print_item.quantity)
 
+        self._refresh_queue_view()
+        self.catalog_toast.show(describe_queue_addition(added, updated))
+
+    def add_product_to_queue(self, product: CatalogProduct) -> None:
+        """Ponto de entrada público para origens externas ao Catálogo
+        Integrado (ex.: seleção múltipla na pesquisa Jueri) alimentarem
+        esta mesma fila — reaproveita exatamente a mesma PrintQueue e a
+        mesma regra de deduplicação usada pela tabela do catálogo, sem
+        nenhuma lógica nova. A quantidade inicial vem de
+        attributes["default_quantity"] (mesma convenção do Excel)."""
+        default_quantity = product.attributes.get("default_quantity")
+        self.print_queue.add_or_increment(product, quantity=default_quantity)
         self._refresh_queue_view()
 
     def _on_remove_from_queue(self) -> None:
         if self._printing_in_progress or self._selected_queue_codigo is None:
             return
 
-        item = self._find_queue_item_by_codigo(self._selected_queue_codigo)
-        if item is None:
-            return
-
-        self.print_queue.remove(item.product)
+        selected = self._selected_queue_codigos or {self._selected_queue_codigo}
+        for codigo in list(selected):
+            item = self._find_queue_item_by_codigo(codigo)
+            if item is not None:
+                self.print_queue.remove(item.product)
+        self._selected_queue_codigos.clear()
         self._selected_queue_codigo = None
         self._refresh_queue_view()
+
+    def _confirm_clear_queue(self) -> None:
+        if self._printing_in_progress or self.print_queue.is_empty():
+            return
+        if messagebox.askyesno(APP_TITLE, "Deseja remover todos os produtos da fila de impressão?"):
+            self._on_clear_queue()
 
     def _on_clear_queue(self) -> None:
         if self._printing_in_progress:
             return
 
         self.print_queue.clear()
+        self._selected_queue_codigos.clear()
         self._selected_queue_codigo = None
         self._refresh_queue_view()
 
@@ -409,8 +702,15 @@ class CatalogTab:
                 return item
         return None
 
-    def _on_select_queue_card(self, codigo: str) -> None:
-        self._selected_queue_codigo = codigo
+    def _on_select_queue_card(self, codigo: str, additive: bool = False) -> None:
+        if additive:
+            if codigo in self._selected_queue_codigos:
+                self._selected_queue_codigos.remove(codigo)
+            else:
+                self._selected_queue_codigos.add(codigo)
+        else:
+            self._selected_queue_codigos = {codigo}
+        self._selected_queue_codigo = codigo if codigo in self._selected_queue_codigos else None
         self._render_queue_cards()
 
     def _on_increment_queue_item(self, codigo: str) -> None:
@@ -420,7 +720,8 @@ class CatalogTab:
         if item is None:
             return
         self.print_queue.increment(item.product)
-        self._refresh_queue_view()
+        self._update_card_quantity_display(codigo, item.quantity)
+        self._update_queue_summary()
 
     def _on_decrement_queue_item(self, codigo: str) -> None:
         if self._printing_in_progress:
@@ -429,7 +730,19 @@ class CatalogTab:
         if item is None:
             return
         self.print_queue.decrement(item.product)
-        self._refresh_queue_view()
+        self._update_card_quantity_display(codigo, item.quantity)
+        self._update_queue_summary()
+
+    def _update_card_quantity_display(self, codigo: str, quantity: int) -> None:
+        """Atualiza só o texto de quantidade do cartão deste produto — não
+        reconstrói a fila inteira. Corrige o bug de usabilidade em que
+        alterar a quantidade fazia a lista voltar ao topo: como nenhum
+        cartão é destruído/recriado, a posição do scroll, a seleção e o
+        foco de todos os itens (inclusive os outros, não só este)
+        permanecem exatamente como estavam."""
+        widgets = self._queue_card_widgets.get(codigo)
+        if widgets is not None:
+            widgets["quantity_label"].configure(text=str(quantity))
 
     def _on_delete_key(self, codigo: str) -> None:
         if self._printing_in_progress:
@@ -463,10 +776,28 @@ class CatalogTab:
         quantity_label.pack_forget()
 
         entry_var = tk.StringVar(value=str(item.quantity))
-        entry = tk.Entry(quantity_row, textvariable=entry_var, width=4, justify="center")
+        entry = tk.Entry(
+            quantity_row,
+            textvariable=entry_var,
+            width=4,
+            justify="center",
+            bg=SURFACE,
+            fg=TEXT,
+            insertbackground=TEXT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            highlightcolor=PRIMARY,
+            relief="flat",
+            font=("Segoe UI", 10),
+        )
         entry.pack(side="left", padx=4)
         entry.focus_set()
         entry.select_range(0, "end")
+
+        widgets = self._queue_card_widgets.setdefault(codigo, {})
+        widgets["quantity_row"] = quantity_row
+        widgets["quantity_label"] = quantity_label
+        widgets["quantity_entry"] = entry
 
         def commit(_event: Any = None) -> None:
             entry.unbind("<FocusOut>")
@@ -478,8 +809,10 @@ class CatalogTab:
     def _commit_quantity_edit(self, codigo: str, raw_value: str) -> None:
         """Aplica a edição direta via PrintQueue.update_quantity(). Se o
         valor digitado não for um número, a fila não é alterada — o
-        próximo _refresh_queue_view() simplesmente redesenha o valor
-        anterior, sem lançar exceção."""
+        cartão simplesmente volta a mostrar o valor anterior, sem lançar
+        exceção. Só o cartão deste produto é atualizado (ver
+        _update_card_quantity_display) — os demais, o scroll e a seleção
+        não são tocados."""
         item = self._find_queue_item_by_codigo(codigo)
         if item is None:
             self._refresh_queue_view()
@@ -489,7 +822,24 @@ class CatalogTab:
         if parsed is not None:
             self.print_queue.update_quantity(item.product, parsed)
 
-        self._refresh_queue_view()
+        self._end_edit_quantity(codigo, item.quantity)
+        self._update_queue_summary()
+
+    def _end_edit_quantity(self, codigo: str, quantity: int) -> None:
+        """Fecha o modo de edição: remove o Entry temporário (se houver) e
+        volta a exibir o rótulo de quantidade, já atualizado — sem
+        redesenhar a fila inteira."""
+        widgets = self._queue_card_widgets.get(codigo)
+        if widgets is None:
+            return
+
+        entry = widgets.pop("quantity_entry", None)
+        if entry is not None:
+            entry.destroy()
+
+        quantity_label = widgets["quantity_label"]
+        quantity_label.configure(text=str(quantity))
+        quantity_label.pack(side="left", padx=4)
 
     def _refresh_queue_view(self) -> None:
         """Único ponto de atualização da fila — chamado sempre que o
@@ -502,16 +852,26 @@ class CatalogTab:
     def _render_queue_cards(self) -> None:
         for child in self.queue_items_frame.winfo_children():
             child.destroy()
+        self._queue_card_widgets = {}
 
         selected_card: tk.Frame | None = None
 
         for item in self.print_queue.to_list():
             codigo_do_item = item.product.codigo
-            is_selected = codigo_do_item == self._selected_queue_codigo
-            bg = "#dbeafe" if is_selected else "#ffffff"
+            is_selected = codigo_do_item in self._selected_queue_codigos
+            bg = SELECTION if is_selected else SURFACE
 
-            card = tk.Frame(self.queue_items_frame, bg=bg, highlightthickness=1, highlightbackground="#dbe2ea")
+            card = tk.Frame(self.queue_items_frame, bg=bg, highlightthickness=1, highlightbackground=BORDER)
             card.pack(fill="x", padx=4, pady=(4, 0))
+            if self._queue_is_global_lateral:
+                for column in range(3):
+                    card.grid_columnconfigure(column, weight=1)
+            else:
+                card.grid_columnconfigure(0, minsize=110)
+                card.grid_columnconfigure(1, weight=1)
+                card.grid_columnconfigure(2, minsize=100)
+                card.grid_columnconfigure(3, minsize=100)
+                card.grid_columnconfigure(4, minsize=150)
             # takefocus permite que o cartão receba foco de teclado ao ser
             # selecionado, para que o atalho DEL (ligado só a este widget)
             # nunca interfira com o Entry de edição de quantidade.
@@ -522,20 +882,44 @@ class CatalogTab:
 
             descricao_label = tk.Label(
                 card, text=item.product.descricao, bg=bg, font=("Segoe UI", 10, "bold"),
-                anchor="w", justify="left", wraplength=220,
+                anchor="w", justify="left", wraplength=310 if self._queue_is_global_lateral else 0,
             )
-            descricao_label.pack(fill="x", padx=6, pady=(6, 0))
-
-            codigo_label = tk.Label(card, text=item.product.codigo, bg=bg, fg="#64748b", font=("Segoe UI", 9), anchor="w")
-            codigo_label.pack(fill="x", padx=6)
+            codigo_text = f"Código: {item.product.codigo}" if self._queue_is_global_lateral else item.product.codigo
+            codigo_label = tk.Label(card, text=codigo_text, bg=bg, fg=MUTED_TEXT, font=("Segoe UI", 9), anchor="w")
 
             quantity_row = tk.Frame(card, bg=bg)
-            quantity_row.pack(padx=6, pady=(2, 6))
+
+            origem = "Jueri" if item.product.attributes.get("origem") == "jueri" else "Excel"
+            origem_text = f"Origem: {origem}" if self._queue_is_global_lateral else origem
+            origem_label = tk.Label(
+                card, text=origem_text, bg=bg, fg=MUTED_TEXT, font=("Segoe UI", 9), anchor="w"
+            )
+            preco_text = f"R$ {item.product.preco:.2f}" if item.product.preco is not None else "—"
+            if self._queue_is_global_lateral:
+                preco_text = f"Preço: {preco_text}"
+            preco_label = tk.Label(
+                card, text=preco_text, bg=bg, fg=TEXT, font=("Segoe UI", 9), anchor="e"
+            )
+
+            if self._queue_is_global_lateral:
+                descricao_label.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=(7, 3))
+                codigo_label.grid(row=1, column=0, columnspan=3, sticky="w", padx=8)
+                origem_label.grid(row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 0))
+                preco_label.grid(row=2, column=2, sticky="e", padx=8, pady=(2, 0))
+                quantity_row.grid(row=3, column=0, columnspan=3, padx=8, pady=(5, 7))
+            else:
+                descricao_label.grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+                codigo_label.grid(row=0, column=0, sticky="w", padx=6, pady=6)
+                quantity_row.grid(row=0, column=4, padx=6, pady=4)
+                origem_label.grid(row=0, column=2, sticky="w", padx=6)
+                preco_label.grid(row=0, column=3, sticky="e", padx=6)
 
             edit_controls_state = "disabled" if self._printing_in_progress else "normal"
 
             tk.Button(
                 quantity_row, text="-", width=2, state=edit_controls_state,
+                bg=SURFACE, fg=TEXT, activebackground=SELECTION, activeforeground=TEXT,
+                highlightbackground=PRIMARY, relief="flat", font=("Segoe UI", 10),
                 command=lambda codigo=codigo_do_item: self._on_decrement_queue_item(codigo),
             ).pack(side="left")
 
@@ -548,13 +932,26 @@ class CatalogTab:
                         self._on_start_edit_quantity(codigo, row, label),
                 )
 
+            self._queue_card_widgets[codigo_do_item] = {
+                "card": card,
+                "quantity_row": quantity_row,
+                "quantity_label": quantidade_label,
+            }
+
             tk.Button(
                 quantity_row, text="+", width=2, state=edit_controls_state,
+                bg=SURFACE, fg=TEXT, activebackground=SELECTION, activeforeground=TEXT,
+                highlightbackground=PRIMARY, relief="flat", font=("Segoe UI", 10),
                 command=lambda codigo=codigo_do_item: self._on_increment_queue_item(codigo),
             ).pack(side="left")
 
-            for widget in (card, descricao_label, codigo_label, quantidade_label):
-                widget.bind("<Button-1>", lambda _event, codigo=codigo_do_item: self._on_select_queue_card(codigo))
+            for widget in (card, descricao_label, codigo_label, origem_label, preco_label, quantidade_label):
+                widget.bind(
+                    "<Button-1>",
+                    lambda event, codigo=codigo_do_item: self._on_select_queue_card(
+                        codigo, additive=bool(event.state & 0x0004)
+                    ),
+                )
 
         if selected_card is not None:
             selected_card.focus_set()
@@ -642,6 +1039,7 @@ class CatalogTab:
         if messagebox.askyesno(APP_TITLE, "A impressão foi concluída com sucesso?"):
             if messagebox.askyesno(APP_TITLE, "Deseja limpar a fila de impressão?"):
                 self.print_queue.clear()
+                self._selected_queue_codigos.clear()
                 self._selected_queue_codigo = None
                 self._refresh_queue_view()
 
@@ -715,7 +1113,11 @@ class CatalogTab:
             var = tk.BooleanVar(value=name in checked)
             self.sheet_vars[name] = var
             ttk.Checkbutton(
-                self.sheets_container, text=name, variable=var, command=self._on_sheet_toggle
+                self.sheets_container,
+                text=name,
+                variable=var,
+                command=self._on_sheet_toggle,
+                style="CatalogConfig.TCheckbutton",
             ).pack(anchor="w")
 
     def _on_sheet_toggle(self) -> None:
@@ -736,8 +1138,8 @@ class CatalogTab:
                 messagebox.showerror(APP_TITLE, f"Não foi possível ler os cabeçalhos: {exc}")
                 headers = []
 
-        for combobox in self.column_comboboxes.values():
-            combobox["values"] = headers
+        for internal_field, combobox in self.column_comboboxes.items():
+            combobox["values"] = (["", *headers] if internal_field in CATALOG_OPTIONAL_FIELDS else headers)
 
     def _save_settings(self) -> None:
         self.settings.file_path = self.file_path_var.get()
@@ -907,23 +1309,29 @@ class CatalogTab:
     def _load_catalog_table(self) -> None:
         self.catalog_tree.delete(*self.catalog_tree.get_children())
         for index, product in enumerate(self.catalog_filtered_products):
-            preco_texto = f"{product.preco:.2f}" if product.preco is not None else ""
+            preco_texto = f"R$ {product.preco:.2f}" if product.preco is not None else "—"
             # Quantidade padrão vive em attributes (não é mais campo do
             # produto) — normalize_quantity() é a mesma regra que
             # CatalogService.create_print_item() usa ao montar um PrintItem.
             quantidade_padrao = normalize_quantity(product.attributes.get("default_quantity"))
+            categoria_visual = product.attributes.get("categoria_visual") or "—"
+            subcategoria_visual = product.attributes.get("subcategoria_visual") or "—"
+            estoque = product.attributes.get("quantidade_estoque")
+            estoque_texto = estoque if estoque not in (None, "") else "—"
             self.catalog_tree.insert(
                 "",
                 "end",
                 iid=str(index),
                 values=(
-                    product.fornecedor,
                     product.codigo,
                     product.descricao,
-                    product.display_category,
-                    product.numeracao,
-                    quantidade_padrao,
                     preco_texto,
+                    product.numeracao or "—",
+                    subcategoria_visual,
+                    categoria_visual,
+                    estoque_texto,
+                    product.fornecedor,
+                    quantidade_padrao,
                 ),
             )
 
@@ -945,3 +1353,51 @@ class CatalogTab:
             return f"Última atualização: {parsed.strftime('%d/%m/%Y %H:%M')}"
         except ValueError:
             return f"Última atualização: {value}"
+
+    # ------------------------------------------------------------------
+    # Persistência de interface — usada pela MainWindow (atalho Ctrl+F e
+    # salvamento/restauração de largura de colunas e ordenação ao
+    # fechar/abrir o programa). Nenhuma lógica de catálogo é alterada.
+    # ------------------------------------------------------------------
+
+    def focus_search_entry(self) -> None:
+        """Atalho global Ctrl+F (ver MainWindow._on_ctrl_f_shortcut) —
+        leva o foco direto ao campo de pesquisa desta aba."""
+        self.catalog_search_entry.focus_set()
+        if self.catalog_search_var.get():
+            self.catalog_search_entry.select_range(0, tk.END)
+            self.catalog_search_entry.icursor(tk.END)
+
+    def get_persisted_state(self) -> dict[str, Any]:
+        """Estado visual persistido: tabela, ordenação e divisórias."""
+        state: dict[str, Any] = {
+            "column_widths": get_column_widths(self.catalog_tree),
+            "vertical_sash": self.vertical_paned.sashpos(0),
+        }
+        if self.horizontal_paned is not None:
+            state["horizontal_sash"] = self.horizontal_paned.sashpos(0)
+        if self._sort_field is not None:
+            state["sort"] = {"field": self._sort_field, "reverse": self._sort_reverse}
+        return state
+
+    def apply_persisted_state(self, state: dict[str, Any]) -> None:
+        """Restaura o estado salvo por get_persisted_state() — chamado uma
+        vez na abertura do programa, depois que o catálogo já foi
+        carregado (a ordenação só pode ser aplicada com o service pronto)."""
+        widths = state.get("column_widths")
+        if widths:
+            apply_column_widths(self.catalog_tree, widths)
+
+        horizontal_sash = state.get("horizontal_sash")
+        vertical_sash = state.get("vertical_sash")
+        self._pending_horizontal_sash = horizontal_sash if isinstance(horizontal_sash, int) else None
+        self._pending_vertical_sash = vertical_sash if isinstance(vertical_sash, int) else None
+        self._pane_positions_restored = False
+        self._restore_pane_positions()
+
+        sort = state.get("sort")
+        if sort and sort.get("field") and self.service is not None:
+            self._sort_field = sort["field"]
+            self._sort_reverse = bool(sort.get("reverse", False))
+            self.service.sort_by(self._sort_field, reverse=self._sort_reverse)
+            self._refresh_catalog_view()

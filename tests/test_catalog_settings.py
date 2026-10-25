@@ -1,12 +1,17 @@
 import unittest
 
-from core.catalog_settings import CATALOG_FIELD_LABELS, CATALOG_FIELDS, CatalogSettings
+from core.catalog_settings import (
+    CATALOG_FIELD_LABELS,
+    CATALOG_FIELDS,
+    CATALOG_OPTIONAL_FIELDS,
+    CatalogSettings,
+)
 
 
 class CatalogSettingsTests(unittest.TestCase):
     def test_quantidade_is_a_registered_catalog_field(self):
         self.assertIn("quantidade", CATALOG_FIELDS)
-        self.assertEqual(CATALOG_FIELD_LABELS["quantidade"], "Quantidade")
+        self.assertEqual(CATALOG_FIELD_LABELS["quantidade"], "Qtd. padrão de etiquetas")
 
     def test_quantidade_mapping_persists_in_config_json(self):
         settings = CatalogSettings(
@@ -29,6 +34,23 @@ class CatalogSettingsTests(unittest.TestCase):
 
         reloaded = CatalogSettings.from_config(config)
         self.assertEqual(reloaded.column_map["quantidade"], "QTD")
+
+    def test_optional_visual_fields_are_registered_and_persist_without_becoming_required(self):
+        self.assertEqual(
+            CATALOG_OPTIONAL_FIELDS,
+            ["categoria_visual", "subcategoria_visual", "estoque"],
+        )
+        settings = CatalogSettings(
+            column_map={
+                "categoria": "SUBCATEGORIA",
+                "categoria_visual": "CATEGORIA",
+                "estoque": "ESTOQUE",
+            }
+        )
+        config: dict = {}
+        settings.save_to(config)
+        reloaded = CatalogSettings.from_config(config)
+        self.assertEqual(reloaded.column_map, settings.column_map)
 
     def test_from_config_defaults_when_missing(self):
         settings = CatalogSettings.from_config({})

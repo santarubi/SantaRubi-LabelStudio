@@ -1,0 +1,13 @@
+# Ambiente reproduzível do build Santa Rubi Label Studio.
+# Usar Python 3.14.6 x64 no Windows.
+PyInstaller==6.21.0
+altgraph==0.17.5
+packaging==26.2
+pefile==2024.8.26
+pyinstaller-hooks-contrib==2026.6
+pywin32-ctypes==0.2.3
+setuptools==83.0.0
+openpyxl==3.1.5
+et_xmlfile==2.0.0
+Pillow==12.3.0
+pywin32==312

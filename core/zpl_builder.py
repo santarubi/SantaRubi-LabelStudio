@@ -94,7 +94,15 @@ class ZplBuilder:
         )
         return total_modules * self.BARCODE_MODULE_WIDTH
 
-    def _truncate(self, text: str, field_width_dots: int, font_size: int, ratio: float) -> str:
+    def _truncate(
+        self,
+        text: str,
+        field_width_dots: int,
+        font_size: int,
+        ratio: float,
+        *,
+        ellipsis: bool = True,
+    ) -> str:
         """Trunca o texto para caber no campo, evitando que a impressora
         quebre/sobreponha linhas quando o texto excede a largura do ^FB."""
         if not text:
@@ -103,6 +111,8 @@ class ZplBuilder:
         max_chars = max(1, int(field_width_dots / (font_size * ratio)))
         if len(text) <= max_chars:
             return text
+        if not ellipsis:
+            return text[:max_chars].rstrip()
         if max_chars <= 3:
             return text[:max_chars]
         return text[: max_chars - 3].rstrip() + "..."
@@ -127,7 +137,18 @@ class ZplBuilder:
         categoria_linha = self._truncate(
             categoria, content_width, self.CATEGORY_FONT_SIZE, REGULAR_CHAR_WIDTH_RATIO
         )
-        descricao_linha = descricao[: self.DESCRIPTION_MAX_CHARS]
+        # DESCRIPTION_MAX_CHARS preserva o corte histórico, mas não garante
+        # cabimento físico: caracteres da fonte 0 têm larguras diferentes.
+        # ^FB com uma única linha redesenha o excedente sobre a última linha,
+        # por isso aplicamos também o mesmo limite de largura já usado pelos
+        # demais campos antes de entregar o texto ao firmware.
+        descricao_linha = self._truncate(
+            descricao[: self.DESCRIPTION_MAX_CHARS],
+            description_width,
+            self.DESCRIPTION_FONT_SIZE,
+            REGULAR_CHAR_WIDTH_RATIO,
+            ellipsis=False,
+        )
         numero_linha = self._truncate(
             numero, self.NUMBER_COLUMN_WIDTH, self.NUMBER_FONT_SIZE, REGULAR_CHAR_WIDTH_RATIO
         )

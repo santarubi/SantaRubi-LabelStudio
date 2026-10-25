@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 from core.catalog_datasource import DataSource
 from core.catalog_excel_source import normalize_header
-from core.catalog_settings import CATALOG_FIELD_LABELS, CATALOG_FIELDS, CatalogSettings
+from core.catalog_settings import CATALOG_FIELD_LABELS, CATALOG_FIELDS, CATALOG_MAPPING_FIELDS, CatalogSettings
 
 
 @dataclass
@@ -83,7 +83,7 @@ class CatalogConfigurationValidator:
             report.issues.append(ValidationIssue(None, internal_field, f"Campo '{label}' não foi mapeado."))
 
         mapped_fields = [
-            internal_field for internal_field in CATALOG_FIELDS if settings.column_map.get(internal_field)
+            internal_field for internal_field in CATALOG_MAPPING_FIELDS if settings.column_map.get(internal_field)
         ]
         headers_by_sheet = self.data_source.get_headers(valid_sheets)
         for sheet_name, headers in headers_by_sheet.items():

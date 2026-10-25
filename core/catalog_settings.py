@@ -13,14 +13,19 @@ from typing import Any
 CATALOG_CONFIG_KEY = "catalog_integrado"
 
 CATALOG_FIELDS = ["codigo", "descricao", "preco", "categoria", "numeracao", "quantidade"]
+CATALOG_OPTIONAL_FIELDS = ["categoria_visual", "subcategoria_visual", "estoque"]
+CATALOG_MAPPING_FIELDS = [*CATALOG_FIELDS, *CATALOG_OPTIONAL_FIELDS]
 
 CATALOG_FIELD_LABELS = {
     "codigo": "Código",
     "descricao": "Descrição",
     "preco": "Preço",
-    "categoria": "Categoria",
+    "categoria": "Categoria/Subcategoria da etiqueta",
     "numeracao": "Numeração",
-    "quantidade": "Quantidade",
+    "quantidade": "Qtd. padrão de etiquetas",
+    "categoria_visual": "Categoria (visualização, opcional)",
+    "subcategoria_visual": "Subcategoria (visualização, opcional)",
+    "estoque": "Estoque (visualização, opcional)",
 }
 
 

@@ -1,12 +1,11 @@
 """Garante que core.print_layout é a única fonte de constantes físicas de
-layout: ZplBuilder e as duas telas que montam trabalhos de impressão em
-lote (ui/main_window.py e ui/catalog_tab.py) devem importar os mesmos
+layout: ZplBuilder e a tela que monta trabalhos de impressão em lote
+(ui/catalog_tab.py, via a fila de impressão) devem importar os mesmos
 valores de lá, nunca redeclará-los."""
 
 import unittest
 
 import ui.catalog_tab as catalog_tab
-import ui.main_window as main_window
 from core import print_layout
 from core.zpl_builder import ZplBuilder
 
@@ -34,7 +33,7 @@ EXPECTED_VALUES = {
     "DESCRIPTION_MAX_CHARS": 26,
     "DESCRIPTION_RIGHT_MARGIN": 4,
     "LAST_ROW_Y": 98,
-    "NUMBER_FONT_SIZE": 13,
+    "NUMBER_FONT_SIZE": 16,
     "NUMBER_COLUMN_WIDTH": 55,
     "PRICE_FONT_SIZE": 18,
     "BATCH_ROW_COLUMNS": 3,
@@ -78,12 +77,8 @@ class ZplBuilderReusesPrintLayoutTests(unittest.TestCase):
 
 
 class NoDuplicatedBatchConstantsTests(unittest.TestCase):
-    """ui/main_window.py e ui/catalog_tab.py importam BATCH_ROW_COLUMNS/
-    BATCH_COLUMN_PITCH de core.print_layout — não redeclaram o valor."""
-
-    def test_main_window_imports_batch_constants_from_print_layout(self):
-        self.assertIs(main_window.BATCH_ROW_COLUMNS, print_layout.BATCH_ROW_COLUMNS)
-        self.assertIs(main_window.BATCH_COLUMN_PITCH, print_layout.BATCH_COLUMN_PITCH)
+    """ui/catalog_tab.py importa BATCH_ROW_COLUMNS/BATCH_COLUMN_PITCH de
+    core.print_layout — não redeclara o valor."""
 
     def test_catalog_tab_imports_batch_constants_from_print_layout(self):
         self.assertIs(catalog_tab.BATCH_ROW_COLUMNS, print_layout.BATCH_ROW_COLUMNS)
@@ -95,18 +90,17 @@ class NoDuplicatedBatchConstantsTests(unittest.TestCase):
         import ast
         import inspect
 
-        for module in (main_window, catalog_tab):
-            source = inspect.getsource(module)
-            tree = ast.parse(source)
-            literal_assignments = [
-                node for node in ast.walk(tree)
-                if isinstance(node, ast.Assign)
-                and any(isinstance(target, ast.Name) and target.id == "BATCH_COLUMN_PITCH" for target in node.targets)
-            ]
-            self.assertEqual(
-                literal_assignments, [],
-                f"{module.__name__} não deveria atribuir BATCH_COLUMN_PITCH diretamente, só importar",
-            )
+        source = inspect.getsource(catalog_tab)
+        tree = ast.parse(source)
+        literal_assignments = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "BATCH_COLUMN_PITCH" for target in node.targets)
+        ]
+        self.assertEqual(
+            literal_assignments, [],
+            "catalog_tab não deveria atribuir BATCH_COLUMN_PITCH diretamente, só importar",
+        )
 
 
 if __name__ == "__main__":

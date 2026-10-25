@@ -124,6 +124,56 @@ class CatalogRepositoryLoadTests(unittest.TestCase):
             repository.load(settings)
             self.assertTrue(repository.is_loaded)
 
+    def test_legacy_subcategory_mapping_and_optional_visual_fields_are_kept_separate(self):
+        source = FakeDataSource(
+            {
+                "PRATA": [
+                    {
+                        "CODIGO": "001234",
+                        "DESCRICAO": "Anel Solitário",
+                        "PRECO": 93.9,
+                        "SUBCATEGORIA": "ANEL SOLITÁRIO",
+                        "CATEGORIA": "ANEL",
+                        "NUMERO": "18",
+                        "QTD ETIQUETAS": 2,
+                        "ESTOQUE": 7,
+                    }
+                ]
+            }
+        )
+        settings = CatalogSettings(
+            selected_sheets=["PRATA"],
+            column_map={
+                "codigo": "CODIGO",
+                "descricao": "DESCRICAO",
+                "preco": "PRECO",
+                "categoria": "SUBCATEGORIA",
+                "numeracao": "NUMERO",
+                "quantidade": "QTD ETIQUETAS",
+                "categoria_visual": "CATEGORIA",
+                "estoque": "ESTOQUE",
+            },
+        )
+
+        product = CatalogRepository(source).load(settings)[0]
+
+        self.assertEqual(product.codigo, "001234")
+        self.assertEqual(product.categoria, "ANEL SOLITÁRIO")
+        self.assertEqual(product.attributes["categoria_visual"], "ANEL")
+        self.assertEqual(product.attributes["subcategoria_visual"], "ANEL SOLITÁRIO")
+        self.assertEqual(product.attributes["quantidade_estoque"], 7)
+        self.assertEqual(product.attributes["default_quantity"], 2)
+
+    def test_old_category_mapping_remains_a_category_when_header_is_not_subcategory(self):
+        source = FakeDataSource({"A": [{"CATEGORIA": "ANEL"}]})
+        settings = CatalogSettings(selected_sheets=["A"], column_map={"categoria": "CATEGORIA"})
+
+        product = CatalogRepository(source).load(settings)[0]
+
+        self.assertEqual(product.categoria, "ANEL")
+        self.assertEqual(product.attributes["categoria_visual"], "ANEL")
+        self.assertEqual(product.attributes["subcategoria_visual"], "")
+
 
 class CatalogRepositoryQuantityTests(unittest.TestCase):
     """A quantidade padrão da coluna QTD NÃO é atribuída a CatalogProduct —

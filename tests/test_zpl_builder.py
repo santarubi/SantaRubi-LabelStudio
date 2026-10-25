@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 
 from core.label_data import LabelData
@@ -59,6 +60,22 @@ class ZplBuilderRowTests(unittest.TestCase):
         zpl = self.builder.build_row(products, column_pitch=self.column_pitch)
         self.assertIn(f"^PW{self.column_pitch * len(products)}", zpl)
 
+    def test_v1_2_release_reference_zpl_bytes_are_unchanged(self):
+        labels = [
+            LabelData(
+                codigo="001234", categoria="ANEL SOLITARIO", descricao="ANEL PRATA ZIRCONIA", numero="18", preco=93.9
+            ),
+            LabelData(codigo="005678", categoria="BRINCO", descricao="BRINCO ARGOLA", numero="", preco=49.9),
+            LabelData(codigo="009999", categoria="COLAR", descricao="COLAR CORACAO", numero="", preco=129.9),
+        ]
+        zpl = self.builder.build_row(labels, column_pitch=264, total_width=792).encode("utf-8")
+
+        self.assertEqual(len(zpl), 785)
+        self.assertEqual(
+            hashlib.sha256(zpl).hexdigest().upper(),
+            "84C67F4345150C1EE81566B318AA29F0C7B2E4A53EAE56060575A226D462D763",
+        )
+
 
 class ZplBuilderBuildAcceptsDictTests(unittest.TestCase):
     """build() continua aceitando dict (usado pela impressão unitária/teste
@@ -85,6 +102,46 @@ class ZplBuilderBuildAcceptsDictTests(unittest.TestCase):
         for line in builder._build_fields(label):
             self.assertIn(line, zpl_from_dict)
             self.assertIn(line, zpl_from_row)
+
+
+class ZplBuilderDescriptionLayoutTests(unittest.TestCase):
+    def test_long_description_is_width_limited_before_single_line_field_block(self):
+        builder = ZplBuilder()
+        label = LabelData(
+            codigo="131848",
+            categoria="COLAR",
+            descricao="COLAR COURINO COUNTRY FERRADURA",
+            numero="",
+            preco=49.9,
+        )
+
+        description_field = next(
+            line for line in builder._build_fields(label)
+            if f",{builder.DESCRIPTION_ROW_Y}^FB" in line
+        )
+
+        self.assertIn("^FB198,1,0,C,0", description_field)
+        self.assertIn("^FDCOLAR COURINO COUNTRY FE^FS", description_field)
+        self.assertNotIn("COLAR COURINO COUNTRY FERR", description_field)
+        self.assertNotIn("...", description_field)
+
+    def test_description_that_already_fits_is_unchanged(self):
+        builder = ZplBuilder()
+        label = LabelData(
+            codigo="131848",
+            categoria="COLAR",
+            descricao="COLAR COURINO",
+            numero="",
+            preco=49.9,
+        )
+
+        description_field = next(
+            line for line in builder._build_fields(label)
+            if f",{builder.DESCRIPTION_ROW_Y}^FB" in line
+        )
+
+        self.assertIn("^FDCOLAR COURINO^FS", description_field)
+        self.assertNotIn("...", description_field)
 
 
 if __name__ == "__main__":
