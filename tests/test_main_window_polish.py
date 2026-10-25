@@ -10,7 +10,9 @@ from __future__ import annotations
 import tkinter as tk
 import unittest
 from typing import Any
+from unittest.mock import patch
 
+from app.version import APP_VERSION
 from app.api.product import Product, ProductPrice
 from core.catalog_product import CatalogProduct
 from ui.main_window import MainWindow
@@ -297,6 +299,29 @@ class InterfacePersistenceTests(unittest.TestCase):
 
         self.assertEqual(self.window.config["catalog_state"], {"column_widths": {"codigo": 111}})
 
+    def test_save_interface_state_records_lateral_queue_ratio(self) -> None:
+        self.root.update()
+        available = self.window.main_paned.winfo_width() - 6
+        self.window.main_paned.sashpos(0, int(available * 0.60))
+
+        self.window._save_interface_state()
+
+        self.assertAlmostEqual(self.window.config["main_queue_width_ratio"], 0.60, delta=0.02)
+
+    def test_lateral_queue_ratio_is_restored_and_old_config_keys_remain_compatible(self) -> None:
+        root2 = tk.Tk()
+        try:
+            window2 = _build_window(
+                root2,
+                config={"main_queue_width_ratio": 0.72, "main_queue_height_ratio": 0.30},
+            )
+            root2.update()
+            window2._restore_main_pane()
+            available = window2.main_paned.winfo_width() - 6
+            self.assertAlmostEqual(window2.main_paned.sashpos(0) / available, 0.72, delta=0.03)
+        finally:
+            root2.destroy()
+
     def test_save_interface_state_records_window_geometry_when_not_zoomed(self) -> None:
         try:
             self.root.state("normal")
@@ -332,6 +357,31 @@ class InterfacePersistenceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(_tk_available(), "ambiente de teste sem display Tk disponível")
+class ApplicationVersionTitleTests(unittest.TestCase):
+    def test_main_window_title_uses_centralized_candidate_version(self) -> None:
+        root = tk.Tk()
+
+        class InMemoryConfigManager:
+            def load(self) -> dict[str, Any]:
+                return {"window_state": "normal"}
+
+            def save(self, _config: dict[str, Any]) -> None:
+                pass
+
+        try:
+            with (
+                patch("ui.main_window.ConfigManager", return_value=InMemoryConfigManager()),
+                patch("ui.main_window.apply_window_icon"),
+                patch.object(MainWindow, "_setup_style"),
+                patch.object(MainWindow, "_build_widgets"),
+            ):
+                MainWindow(root)
+            self.assertEqual(root.title(), f"Santa Rubi Label Studio {APP_VERSION}")
+        finally:
+            root.destroy()
+
+
+@unittest.skipUnless(_tk_available(), "ambiente de teste sem display Tk disponível")
 class GlobalShortcutTests(unittest.TestCase):
     """Melhoria 6 — atalhos globais (F3, Ctrl+F, Ctrl+P, Ctrl+L)."""
 
@@ -349,14 +399,22 @@ class GlobalShortcutTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.root.destroy()
 
-    def test_f3_opens_the_jueri_search(self) -> None:
-        calls: list[Any] = []
-        self.window._on_search_jueri_product = lambda prefill=None: calls.append(prefill)
+    def test_f3_selects_embedded_jueri_search_without_opening_toplevel(self) -> None:
+        self.window.notebook.select(self.window.catalog_tab_frame)
+        toplevels_before = [widget for widget in self.root.winfo_children() if isinstance(widget, tk.Toplevel)]
 
-        self.root.event_generate("<F3>")
-        self.root.update()
+        with patch.object(
+            self.window.jueri_search_panel,
+            "focus_search_entry",
+            wraps=self.window.jueri_search_panel.focus_search_entry,
+        ) as focus_search:
+            self.root.event_generate("<F3>")
+            self.root.update()
 
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.window.notebook.index(self.window.notebook.select()), 0)
+        focus_search.assert_called_once()
+        toplevels_after = [widget for widget in self.root.winfo_children() if isinstance(widget, tk.Toplevel)]
+        self.assertEqual(toplevels_after, toplevels_before)
 
     def test_ctrl_f_switches_to_catalog_tab_and_focuses_search(self) -> None:
         focused: list[bool] = []
@@ -379,7 +437,7 @@ class GlobalShortcutTests(unittest.TestCase):
 
     def test_ctrl_l_triggers_clear_queue(self) -> None:
         calls: list[Any] = []
-        self.window.catalog_tab._on_clear_queue = lambda: calls.append(True)
+        self.window.catalog_tab._confirm_clear_queue = lambda: calls.append(True)
 
         self.root.event_generate("<Control-l>")
         self.root.update()

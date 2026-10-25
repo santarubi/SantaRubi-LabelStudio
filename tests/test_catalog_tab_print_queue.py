@@ -154,6 +154,17 @@ class CatalogTabPrintQueueTests(unittest.TestCase):
         self.tab._on_remove_from_queue()
         self.assertEqual(self.tab.print_queue.count(), 1, "sem card selecionado, remover nao deve afetar a fila")
 
+    def test_remove_multiple_selected_queue_items(self):
+        self._select_rows(0, 1)
+        self.tab._on_add_to_queue()
+        codes = [product.codigo for product in self.tab.catalog_filtered_products[:2]]
+        self.tab._on_select_queue_card(codes[0])
+        self.tab._on_select_queue_card(codes[1], additive=True)
+
+        self.tab._on_remove_from_queue()
+
+        self.assertTrue(self.tab.print_queue.is_empty())
+
     def test_clear_queue_empties_it(self):
         self._select_rows(0, 1)
         self.tab._on_add_to_queue()

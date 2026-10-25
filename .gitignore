@@ -11,6 +11,7 @@ __pycache__/
 # Distribuição / build
 build/
 dist/
+release/
 *.egg-info/
 
 # Editores / IDEs
@@ -24,4 +25,40 @@ desktop.ini
 # Arquivos de dados locais (planilhas de teste, saídas geradas)
 data/*
 !data/.gitkeep
+
+# Configurações locais e credenciais
+.env
+.env.*
+!.env.example
+config.json
+credentials*.json
+secrets*.json
+cookies*.json
+session*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dados operacionais, logs e backups
+*.xls
+*.xlsx
+*.csv
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.bak
+*.backup
+*.zip
+*.7z
+*.rar
+
+# Capturas locais de homologação podem conter caminhos e dados operacionais
+docs/screenshots/
+
+# Binários gerados
+*.exe
+*.msi
+
 .claude/

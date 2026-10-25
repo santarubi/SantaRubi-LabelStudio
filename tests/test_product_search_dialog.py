@@ -107,7 +107,7 @@ class ProductSearchDialogTests(unittest.TestCase):
         self.assertEqual(api.calls, [{"search": None}])
         children = dialog.results_tree.get_children()
         self.assertEqual(len(children), 1)
-        self.assertEqual(dialog.status_var.get(), "1 produto(s) encontrado(s).")
+        self.assertEqual(dialog.status_var.get(), "1 produto(s) na página carregada.")
 
     def test_opening_the_dialog_with_no_products_shows_message(self):
         api = FakeProductsAPI(result=ProductSearchResult(products=[]))
@@ -161,8 +161,38 @@ class ProductSearchDialogTests(unittest.TestCase):
         children = dialog.results_tree.get_children()
         self.assertEqual(len(children), 1)
         values = dialog.results_tree.item(children[0], "values")
-        self.assertEqual(values, ("30856875", "Anel de ouro 18k", "R$ 49.99", "3.33 g"))
-        self.assertEqual(dialog.status_var.get(), "1 produto(s) encontrado(s).")
+        self.assertEqual(
+            values,
+            ("30856875", "Anel de ouro 18k", "R$ 49.99", "—", "—", "—", "—", "—"),
+        )
+
+    def test_results_show_real_category_subcategory_number_price_and_stock(self):
+        class DetailedCategoriesAPI:
+            categoria_por_id = {10: "ANEL"}
+
+            @staticmethod
+            def nome_subcategoria(subcategoria_id):
+                return {20: "ANEL SOLITÁRIO"}.get(subcategoria_id)
+
+        product = build_product(
+            codigo_barras="001234",
+            fk_categoria_id=10,
+            fk_subcategoria_id=20,
+            numero_peca="18",
+            quantidade=7,
+            data_criacao="2026-10-24 11:37:00",
+            tipo_preco=[{"id": 1, "nome": "Varejo", "pivot": {"preco": 93.9}}],
+        )
+        api = FakeProductsAPI(result=ProductSearchResult(products=[product]))
+        dialog = ProductSearchDialog(self.root, api, categories_api=DetailedCategoriesAPI())
+
+        values = dialog.results_tree.item("0", "values")
+
+        self.assertEqual(
+            values,
+            ("001234", "Anel de ouro 18k", "R$ 93.90", "18", "ANEL SOLITÁRIO", "ANEL", "7", "24/10/2026"),
+        )
+        self.assertEqual(dialog.status_var.get(), "1 produto(s) na página carregada.")
 
     def test_run_search_with_no_results_shows_message(self):
         api = FakeProductsAPI(result=ProductSearchResult(products=[]))
@@ -195,8 +225,8 @@ class ProductSearchDialogTests(unittest.TestCase):
         api = FakeProductsAPI()
         dialog = self._build_dialog(api)
 
-        with patch.object(dialog, "after", wraps=dialog.after) as mock_after, patch.object(
-            dialog, "after_cancel", wraps=dialog.after_cancel
+        with patch.object(dialog.panel, "after", side_effect=["job-1", "job-2"]) as mock_after, patch.object(
+            dialog.panel, "after_cancel"
         ) as mock_after_cancel:
             dialog._on_search_changed()
             dialog._on_search_changed()
@@ -204,8 +234,7 @@ class ProductSearchDialogTests(unittest.TestCase):
             self.assertEqual(mock_after.call_count, 2)
             mock_after_cancel.assert_called_once()
 
-        if dialog._debounce_job is not None:
-            dialog.after_cancel(dialog._debounce_job)
+        dialog._debounce_job = None
 
     def test_single_code_search_uses_search_products_not_multiple(self):
         api = FakeProductsAPI(result=ProductSearchResult(products=[]))
@@ -391,7 +420,7 @@ class ProductSearchDialogTests(unittest.TestCase):
         dialog._on_add_selected()
 
         self.assertEqual(added_batches, [])
-        self.assertEqual(dialog.status_var.get(), "Nenhum produto selecionado.")
+        self.assertEqual(dialog.feedback_var.get(), "Nenhum produto selecionado.")
         self.assertTrue(dialog.winfo_exists(), "dialogo nao deveria fechar")
 
     def test_add_selected_with_one_product_calls_callback_with_a_list(self):
@@ -428,7 +457,7 @@ class ProductSearchDialogTests(unittest.TestCase):
         dialog._on_add_selected()
 
         self.assertTrue(dialog.winfo_exists(), "usuario deve poder continuar pesquisando e adicionando mais")
-        self.assertIn("adicionado", dialog.status_var.get())
+        self.assertIn("adicionado", dialog.feedback_var.get())
 
     def test_adding_selected_clears_the_selection_afterwards(self):
         api = FakeProductsAPI(result=ProductSearchResult(products=[build_product()]))
@@ -500,7 +529,7 @@ class ProductSearchDialogTests(unittest.TestCase):
         dialog.results_tree.selection_set(["0"])
         dialog._on_add_selected()  # não deve levantar
 
-        self.assertIn("adicionado", dialog.status_var.get())
+        self.assertIn("adicionado", dialog.feedback_var.get())
 
     def test_cancel_button_closes_dialog_without_calling_callback(self):
         added_batches: list[list[Product]] = []

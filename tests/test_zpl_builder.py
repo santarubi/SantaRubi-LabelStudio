@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 
 from core.label_data import LabelData
@@ -58,6 +59,22 @@ class ZplBuilderRowTests(unittest.TestCase):
         products = [self._product("111111"), self._product("222222")]
         zpl = self.builder.build_row(products, column_pitch=self.column_pitch)
         self.assertIn(f"^PW{self.column_pitch * len(products)}", zpl)
+
+    def test_v1_2_release_reference_zpl_bytes_are_unchanged(self):
+        labels = [
+            LabelData(
+                codigo="001234", categoria="ANEL SOLITARIO", descricao="ANEL PRATA ZIRCONIA", numero="18", preco=93.9
+            ),
+            LabelData(codigo="005678", categoria="BRINCO", descricao="BRINCO ARGOLA", numero="", preco=49.9),
+            LabelData(codigo="009999", categoria="COLAR", descricao="COLAR CORACAO", numero="", preco=129.9),
+        ]
+        zpl = self.builder.build_row(labels, column_pitch=264, total_width=792).encode("utf-8")
+
+        self.assertEqual(len(zpl), 785)
+        self.assertEqual(
+            hashlib.sha256(zpl).hexdigest().upper(),
+            "84C67F4345150C1EE81566B318AA29F0C7B2E4A53EAE56060575A226D462D763",
+        )
 
 
 class ZplBuilderBuildAcceptsDictTests(unittest.TestCase):

@@ -100,6 +100,16 @@ class CatalogTabPolishTests(unittest.TestCase):
 
     # --- Melhoria 2: feedback discreto (nunca messagebox) ---
 
+    def test_catalog_table_distinguishes_product_details_stock_and_label_quantity(self) -> None:
+        values = self.tab.catalog_tree.item("0", "values")
+
+        self.assertEqual(
+            values,
+            ("1001", "Anel A", "R$ 10.00", "16", "—", "Aneis", "—", "DIP-15", "1"),
+        )
+        self.assertEqual(self.tab.catalog_tree.heading("estoque", "text"), "Estoque")
+        self.assertEqual(self.tab.catalog_tree.heading("quantidade", "text"), "Qtd. etiquetas")
+
     def test_adding_new_products_shows_success_toast(self) -> None:
         self.tab.catalog_tree.selection_set(["0", "1"])
 

@@ -9,10 +9,16 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from ui.design_system import BACKGROUND
+
 DEFAULT_DURATION_MS = 3500
 
-SUCCESS = ("#166534", "#dcfce7")  # texto, fundo
-INFO = ("#1d4ed8", "#dbeafe")
+# Tons suaves, legíveis e coerentes com a paleta institucional. A tupla
+# pública permanece igual para não alterar o comportamento dos chamadores.
+SUCCESS = ("#3F6B4F", "#E4EFE2")  # texto, fundo
+WARNING = ("#7A5A2A", "#F4E8CB")
+ERROR = ("#884B45", "#F3E2DF")
+INFO = ("#5F5A50", "#E9E2D2")
 
 
 class Toast:
@@ -23,11 +29,11 @@ class Toast:
         # Guarda o fundo original do rótulo para restaurá-lo ao limpar —
         # sem isso, a cor de destaque (verde/azul) ficaria visível como
         # uma caixa vazia depois que o texto desaparece.
-        self._idle_bg = label.cget("bg")
+        self._idle_bg = label.cget("bg") or BACKGROUND
         # Cancela o after() pendente se a janela fechar antes do tempo —
         # sem isso, o timer tenta rodar mais tarde contra um widget já
         # destruído (mesma classe de bug já corrigida no debounce de
-        # ProductSearchDialog._run_search).
+        # JueriSearchPanel._run_search).
         label.bind("<Destroy>", self._on_destroy, add="+")
 
     def _on_destroy(self, _event: object = None) -> None:

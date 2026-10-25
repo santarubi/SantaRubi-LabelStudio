@@ -2,7 +2,7 @@
 histórico de pesquisas recentes, tabela "Resultado da Última Pesquisa"
 (ordenação, seleção, envio para a fila) e status da conexão.
 
-Não cobre a pesquisa em si (ProductsAPI/ProductSearchDialog já têm seus
+Não cobre a pesquisa em si (ProductsAPI/JueriSearchPanel já têm seus
 próprios testes) nem a fila de impressão (core/print_queue.py já tem os
 seus) — só as interações novas desta reorganização de interface.
 """
@@ -20,18 +20,27 @@ from ui.main_window import MainWindow
 
 
 class FakeConfigManager:
+    def __init__(self) -> None:
+        self.saved: list[dict[str, Any]] = []
+
     def save(self, config: dict[str, Any]) -> None:
-        pass
+        self.saved.append(dict(config))
 
 
 class FakeCategoriesAPI:
-    def __init__(self, names: dict[int, str]) -> None:
+    def __init__(self, names: dict[int, str], subcategory_names: dict[int, str] | None = None) -> None:
         self.names = names
+        self.subcategory_names = subcategory_names or {}
 
     def nome_categoria(self, categoria_id: int | None) -> str | None:
         if categoria_id is None:
             return None
         return self.names.get(categoria_id)
+
+    def nome_subcategoria(self, subcategoria_id: int | None) -> str | None:
+        if subcategoria_id is None:
+            return None
+        return self.subcategory_names.get(subcategoria_id)
 
 
 class FakePrintQueue:
@@ -70,6 +79,7 @@ def _product(
     data_criacao: str | None = None,
     preco: float | None = None,
     categoria_id: int | None = None,
+    subcategoria_id: int | None = None,
 ) -> Product:
     tipo_preco = [ProductPrice(id=1, nome="Varejo", preco=preco)] if preco is not None else []
     return Product(
@@ -79,6 +89,7 @@ def _product(
         quantidade=quantidade,
         data_criacao=data_criacao,
         fk_categoria_id=categoria_id,
+        fk_subcategoria_id=subcategoria_id,
         tipo_preco=tipo_preco,
     )
 
@@ -152,7 +163,10 @@ class JueriResultsTableTests(unittest.TestCase):
         self.window._load_jueri_results_table()
 
         values = [str(value) for value in self.window.jueri_results_tree.item("0")["values"]]
-        self.assertEqual(values, ["181021", "ANEL SOLITÁRIO", "Anéis", "5", "20/07/2026", "R$ 59.90"])
+        self.assertEqual(
+            values,
+            ["181021", "ANEL SOLITÁRIO", "R$ 59.90", "—", "—", "Anéis", "5", "20/07/2026"],
+        )
         self.assertEqual(self.window.jueri_result_count_var.get(), "1")
 
     def test_load_results_table_shows_dash_for_missing_fields(self) -> None:
@@ -160,7 +174,7 @@ class JueriResultsTableTests(unittest.TestCase):
         self.window._load_jueri_results_table()
 
         values = [str(value) for value in self.window.jueri_results_tree.item("0")["values"]]
-        self.assertEqual(values, ["181021", "ANEL", "—", "—", "—", "—"])
+        self.assertEqual(values, ["181021", "ANEL", "—", "—", "—", "—", "—", "—"])
 
     def test_sort_estoque_is_numeric_not_textual(self) -> None:
         """Regressão: estoque "8" não pode ordenar depois de "30" como texto."""
@@ -236,6 +250,27 @@ class JueriAddSelectionToQueueTests(unittest.TestCase):
 
         self.assertEqual(len(self.window.catalog_tab.added), 1)
         self.assertEqual(self.window.catalog_tab.added[0].codigo, "181050")
+
+    def test_print_mapping_uses_subcategory_name_instead_of_category_name(self) -> None:
+        self.window._jueri_categories_api = FakeCategoriesAPI(
+            {10: "COLARES"},
+            {20: "BANHADO PRATA"},
+        )
+        self.window.jueri_last_search_results = [
+            _product(
+                1,
+                "181021",
+                "COLAR",
+                categoria_id=10,
+                subcategoria_id=20,
+            )
+        ]
+        self.window._load_jueri_results_table()
+        self.window.jueri_results_tree.selection_set(["0"])
+
+        self.window._on_add_jueri_selection_to_queue()
+
+        self.assertEqual(self.window.catalog_tab.added[0].categoria, "BANHADO PRATA")
 
     @patch("ui.main_window.messagebox.showinfo")
     def test_no_selection_shows_warning_and_adds_nothing(self, mock_showinfo) -> None:
@@ -318,18 +353,95 @@ class JueriConnectionStatusTests(unittest.TestCase):
     def test_status_disabled_when_integration_not_enabled(self) -> None:
         self.window.config = {"jueri": {"enabled": False}}
         self.window._refresh_jueri_connection_status()
-        self.assertEqual(self.window.jueri_status_var.get(), "Desabilitada")
+        self.assertEqual(self.window.jueri_status_var.get(), "Desconectado")
 
     def test_status_incomplete_when_enabled_but_missing_credentials(self) -> None:
         self.window.config = {"jueri": {"enabled": True, "cliente_sistema": "", "token": ""}}
         self.window._refresh_jueri_connection_status()
-        self.assertEqual(self.window.jueri_status_var.get(), "Credenciais incompletas")
+        self.assertEqual(self.window.jueri_status_var.get(), "Desconectado")
 
     def test_status_enabled_with_complete_credentials(self) -> None:
         self.window.config = {"jueri": {"enabled": True, "cliente_sistema": "santarubi", "token": "abc"}}
         self.window._refresh_jueri_connection_status()
-        self.assertEqual(self.window.jueri_status_var.get(), "Habilitada")
-        self.assertEqual(self.window.jueri_client_var.get(), "santarubi")
+        self.assertEqual(self.window.jueri_status_var.get(), "Conectado")
+
+
+@unittest.skipUnless(_tk_available(), "ambiente de teste sem display Tk disponível")
+class UniversalQueueLayoutTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = tk.Tk()
+        self.window = _build_window(self.root)
+        self.root.update_idletasks()
+
+    def tearDown(self) -> None:
+        self.root.destroy()
+
+    def test_queue_is_outside_notebook_and_survives_tab_switches(self) -> None:
+        queue_widget = self.window.catalog_tab.queue_canvas
+        ancestor = queue_widget.master
+        while ancestor is not None:
+            self.assertIsNot(ancestor, self.window.notebook)
+            ancestor = getattr(ancestor, "master", None)
+
+        self.window.notebook.select(self.window.catalog_tab_frame)
+        self.window.notebook.select(self.window.jueri_tab_frame)
+        self.assertIs(self.window.catalog_tab.queue_canvas, queue_widget)
+
+    def test_main_divider_is_horizontal_and_starts_near_65_percent(self) -> None:
+        self.root.update()
+        self.window._restore_main_pane()
+        available = self.window.main_paned.winfo_width() - 6
+        ratio = self.window.main_paned.sashpos(0) / available
+
+        self.assertEqual(str(self.window.main_paned.cget("orient")), "horizontal")
+        self.assertAlmostEqual(ratio, 0.65, delta=0.03)
+
+    def test_jueri_search_is_embedded_and_operational_header_has_no_client_id(self) -> None:
+        ancestor = self.window.jueri_search_panel.master
+        while ancestor is not None and ancestor is not self.window.jueri_tab_frame:
+            self.assertNotIsInstance(ancestor, tk.Toplevel)
+            ancestor = getattr(ancestor, "master", None)
+        self.assertIs(ancestor, self.window.jueri_tab_frame)
+
+        texts: list[str] = []
+        status_bindings = 0
+        pending = [self.root]
+        while pending:
+            widget = pending.pop()
+            pending.extend(widget.winfo_children())
+            try:
+                text = str(widget.cget("text"))
+                if text:
+                    texts.append(text)
+            except tk.TclError:
+                pass
+            try:
+                status_bindings += str(widget.cget("textvariable")) == str(self.window.jueri_status_var)
+            except tk.TclError:
+                pass
+
+        self.assertNotIn("Cliente", texts)
+        self.assertEqual(status_bindings, 1)
+
+    def test_queue_shows_items_from_both_origins(self) -> None:
+        excel = CatalogProduct("100", "Excel", 10.0, "", "", "Aba", {"origem": "excel"})
+        jueri = CatalogProduct("200", "Jueri", 20.0, "", "", "Jueri", {"origem": "jueri"})
+        self.window.catalog_tab.add_product_to_queue(excel)
+        self.window.catalog_tab.add_product_to_queue(jueri)
+
+        origin_texts = [
+            card.winfo_children()[3].cget("text")
+            for card in self.window.catalog_tab.queue_items_frame.winfo_children()
+        ]
+        self.assertEqual(origin_texts, ["Origem: Excel", "Origem: Jueri"])
+
+    def test_queue_keeps_a_usable_minimum_width(self) -> None:
+        self.root.update()
+        self.window.main_paned.sashpos(0, self.window.main_paned.winfo_width())
+        self.window._restore_main_pane()
+        self.root.update_idletasks()
+        queue_width = self.window.main_paned.winfo_width() - self.window.main_paned.sashpos(0)
+        self.assertGreaterEqual(queue_width, 280)
 
 
 class JueriDateFormattingTests(unittest.TestCase):
@@ -345,6 +457,19 @@ class JueriDateFormattingTests(unittest.TestCase):
 
     def test_falls_back_to_raw_value_for_unknown_format(self) -> None:
         self.assertEqual(MainWindow._format_jueri_date("não é uma data"), "não é uma data")
+
+
+class JueriFilterConfigTests(unittest.TestCase):
+    def test_saving_filters_preserves_credentials_and_other_settings(self) -> None:
+        window = MainWindow.__new__(MainWindow)
+        window.config = {"jueri": {"enabled": True, "token": "segredo"}, "last_printer": "ELGIN"}
+        window.config_manager = FakeConfigManager()
+
+        window._save_jueri_search_filters({"stock": "Com estoque", "query": "anel"})
+
+        self.assertEqual(window.config["jueri"]["token"], "segredo")
+        self.assertEqual(window.config["last_printer"], "ELGIN")
+        self.assertEqual(window.config["jueri_search_filters"]["stock"], "Com estoque")
 
 
 if __name__ == "__main__":

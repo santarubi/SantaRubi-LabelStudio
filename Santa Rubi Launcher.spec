@@ -1,11 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+import runpy
+
+
+project_root = Path(SPECPATH)
+release_metadata = runpy.run_path(str(project_root / 'scripts' / 'release_metadata.py'))
+version_info_path = release_metadata['write_windows_version_info'](
+    project_root,
+    Path(workpath) / 'windows_version_info.txt',
+)
+icon_path = project_root / 'assets' / 'santa-rubi-app.ico'
 
 a = Analysis(
-    ['scripts/launcher.py'],
+    [str(project_root / 'scripts' / 'launcher.py')],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[(str(icon_path), 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -23,6 +34,8 @@ exe = EXE(
     a.datas,
     [],
     name='Santa Rubi Launcher',
+    icon=str(icon_path),
+    version=str(version_info_path),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

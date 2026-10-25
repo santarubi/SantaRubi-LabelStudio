@@ -72,18 +72,40 @@ class CatalogRepository:
         return self.load(settings)
 
     def _to_product(self, row: dict[str, Any], column_map: dict[str, str]) -> CatalogProduct:
+        categoria_etiqueta = self._as_text(self._mapped_value(row, column_map, "categoria"))
+        categoria_visual = self._as_text(self._mapped_value(row, column_map, "categoria_visual"))
+        subcategoria_visual = self._as_text(self._mapped_value(row, column_map, "subcategoria_visual"))
+
+        # Compatibilidade com o mapeamento homologado: em instalações Santa
+        # Rubi, o campo legado `categoria` pode apontar para uma coluna chamada
+        # SUBCATEGORIA porque esse valor é o texto impresso na etiqueta. Ele
+        # continua intocado; a detecção abaixo serve apenas para apresentar as
+        # duas informações na coluna correta da tabela.
+        legacy_header = normalize_header(column_map.get("categoria", "")).replace(" ", "").casefold()
+        legacy_is_subcategory = "subcategoria" in legacy_header
+        if not categoria_visual and not legacy_is_subcategory:
+            categoria_visual = categoria_etiqueta
+        if not subcategoria_visual and legacy_is_subcategory:
+            subcategoria_visual = categoria_etiqueta
+
         return CatalogProduct(
             codigo=self._as_text(self._mapped_value(row, column_map, "codigo")),
             descricao=self._as_text(self._mapped_value(row, column_map, "descricao")),
             preco=self._as_float(self._mapped_value(row, column_map, "preco")),
-            categoria=self._as_text(self._mapped_value(row, column_map, "categoria")),
+            categoria=categoria_etiqueta,
             numeracao=self._as_text(self._mapped_value(row, column_map, "numeracao")),
             fornecedor=self._as_text(row.get("_sheet")),
             # A quantidade da coluna QTD NÃO é um campo do produto — é só a
             # quantidade padrão de impressão, guardada aqui temporariamente
             # (valor bruto, sem normalizar) para CatalogService.create_print_item()
             # usar ao montar um PrintItem. O domínio do produto continua limpo.
-            attributes={"default_quantity": self._mapped_value(row, column_map, "quantidade")},
+            attributes={
+                "default_quantity": self._mapped_value(row, column_map, "quantidade"),
+                "categoria_visual": categoria_visual,
+                "subcategoria_visual": subcategoria_visual,
+                "quantidade_estoque": self._mapped_value(row, column_map, "estoque"),
+                "origem": "excel",
+            },
         )
 
     def _mapped_value(self, row: dict[str, Any], column_map: dict[str, str], internal_field: str) -> Any:

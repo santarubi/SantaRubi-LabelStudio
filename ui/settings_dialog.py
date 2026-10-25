@@ -13,12 +13,14 @@ from typing import Any
 from app.api.auth import JueriCredentials
 from app.api.connection_test import test_connection
 from core.config import ConfigManager
+from ui.branding import AboutDialog, apply_window_icon
 
 
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, config_manager: ConfigManager, config: dict[str, Any]) -> None:
         super().__init__(parent)
         self.title("Configurações")
+        apply_window_icon(self)
         self.geometry("480x340")
         self.minsize(420, 320)
         self.transient(parent)
@@ -69,6 +71,12 @@ class SettingsDialog(tk.Toplevel):
         ttk.Label(section, textvariable=self.jueri_result_var, style="Subtitle.TLabel", wraplength=380).grid(
             row=6, column=0, sticky="w", pady=(8, 0)
         )
+        ttk.Button(container, text="Sobre", style="App.TButton", command=self._open_about).grid(
+            row=1, column=0, sticky="e", pady=(12, 0)
+        )
+
+    def _open_about(self) -> None:
+        AboutDialog(self)
 
     def _save_jueri_settings(self) -> None:
         self.credentials.enabled = self.jueri_enabled_var.get()

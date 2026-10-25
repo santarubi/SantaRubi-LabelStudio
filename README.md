@@ -5,25 +5,22 @@ produtos (planilhas Excel) e imprime etiquetas de 30×15mm numa impressora
 térmica ELGIN L42PRO FULL, via comando ZPL nativo (RAW), sem depender do
 driver gráfico do Windows.
 
-**Versão atual:** `v3.0-stable` — arquitetura de impressão e catálogo
-consolidadas. Ver [CHANGELOG.md](CHANGELOG.md) para o histórico completo de
-versões e [ARCHITECTURE.md](ARCHITECTURE.md) para a documentação técnica.
+**Versão atual homologada em produção:** `v1.2.0`. Ver
+[CHANGELOG.md](CHANGELOG.md) para o histórico completo de versões,
+[ARCHITECTURE.md](ARCHITECTURE.md) para a documentação técnica e
+[docs/RELEASE_v1.1.2.md](docs/RELEASE_v1.1.2.md) para o processo de release.
 
 ## Visão geral
 
-A aplicação tem duas telas (abas), cada uma resolvendo um problema diferente
-do dia a dia da loja:
+A aplicação tem duas abas de origem de produtos e uma fila universal:
 
-- **Aba "Impressão"** — fluxo original e mais direto: carrega uma planilha
-  Excel, permite pesquisar/filtrar/selecionar produtos na tabela e imprimir
-  (unitária, em lote ou apenas os selecionados). Congelada desde a versão
-  `v1.3-produtividade`.
-- **Aba "Catálogo Integrado"** — um catálogo permanente e configurável
-  (múltiplas abas/planilhas, mapeamento de colunas), com uma **Fila de
-  Impressão** própria: o usuário monta a fila (adicionar, remover, ajustar
-  quantidade pelo `[-]`/`[+]` ou edição direta) e imprime tudo de uma vez,
-  reaproveitando integralmente o mesmo motor de impressão da aba
-  "Impressão" — nenhum código de impressão é duplicado entre as duas.
+- **API Jueri** — pesquisa por código/descrição e datas, filtros de estoque e
+  categoria, ordenação, favoritos e pesquisas recentes.
+- **Planilha Excel** — catálogo permanente configurável, com múltiplas abas,
+  mapeamento de colunas, pesquisa e filtros locais.
+- **Fila de Impressão Universal** — permanece visível à direita das duas abas e
+  recebe itens de ambas as origens no mesmo `PrintQueue`. Permite ajustar
+  quantidade, remover um ou vários itens, limpar com confirmação e imprimir.
 
 As duas abas convergem no mesmo motor de impressão (`ZplBuilder` +
 `PrinterService`), o que garante que qualquer correção ou calibração física
@@ -91,10 +88,22 @@ feita em um lugar vale para as duas.
 python app.py
 ```
 
-Isso abre a janela principal com as duas abas ("Impressão" e "Catálogo
-Integrado"). Cada aba é independente: comece pela que fizer sentido para a
-tarefa (impressão pontual a partir de uma planilha, ou o catálogo permanente
-configurado uma vez e reutilizado no dia a dia).
+Isso abre a janela principal com as abas "API Jueri" e "Planilha Excel". A fila
+universal permanece visível na lateral direita ao alternar entre elas.
+
+## Build de produção
+
+A release v1.2.0 é gerada separadamente dos artefatos de desenvolvimento:
+
+```
+python -m pip install -r requirements-release.txt
+python scripts/build_release.py
+```
+
+O resultado fica em `release/v1.2.0/` e contém somente o EXE
+destinado ao usuário e o relatório `RELEASE_INFO.txt`. Artefatos de versões
+anteriores na raiz de `release/` não são sobrescritos. O Launcher continua
+exclusivo do ambiente de desenvolvimento e não faz parte do pacote de produção.
 
 ## Estrutura do projeto
 
@@ -111,7 +120,7 @@ SantaRubi-LabelStudio/
 ├── CLAUDE.md                      # Regras de desenvolvimento do projeto
 │
 ├── core/                          # Lógica de negócio — sem Tkinter
-│   ├── config.py                  # Persistência de preferências (data/config.json)
+│   ├── config.py                  # Preferências em %LOCALAPPDATA%/Santa Rubi Label Studio
 │   ├── excel_reader.py            # Leitura/validação da planilha da aba "Impressão"
 │   ├── barcode.py                 # Código de barras para o preview (bitmap)
 │   ├── label_renderer.py          # Renderização bitmap da etiqueta (SOMENTE preview)
@@ -139,7 +148,7 @@ SantaRubi-LabelStudio/
 ├── tests/                          # Suíte de testes automatizados (unittest)
 ├── assets/                         # Ícones/imagens (reservado)
 ├── layouts/                        # Templates de layout futuros (reservado)
-└── data/                           # config.json, print_log.txt (gerados em tempo de execução)
+└── data/                           # Reservado para dados de desenvolvimento
 ```
 
 Ver [ARCHITECTURE.md](ARCHITECTURE.md) para a responsabilidade detalhada de

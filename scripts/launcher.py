@@ -41,6 +41,7 @@ from scripts.project_signature import (
     needs_rebuild,
     save_build_info,
 )
+from ui.branding import APP_VERSION, apply_window_icon
 
 BUILD_SCRIPT = PROJECT_ROOT / "scripts" / "build.bat"
 EXE_PATH = PROJECT_ROOT / "dist" / "Santa Rubi Label Studio.exe"
@@ -50,7 +51,8 @@ BUILD_INFO_PATH = PROJECT_ROOT / "dist" / "build_info.json"
 class LauncherWindow(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("Santa Rubi Launcher")
+        self.title(f"Santa Rubi Launcher {APP_VERSION}")
+        apply_window_icon(self)
         self.geometry("620x420")
         self.minsize(620, 420)
 
